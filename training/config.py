@@ -164,22 +164,22 @@ class ImageConfig:
 
 @dataclass
 class TrainingHyperparams:
-    batch_size: int = 4
-    learning_rate: float = 1e-3
-    epochs: int = 30
+   batch_size = 4                 # Keep
+learning_rate = 1e-3           # Keep
+epochs = 30                    # Keep
 
-    optimizer: OptimizerName = "adamw"
-    weight_decay: float = 1e-4
+optimizer = "adamw"            # Keep
+weight_decay = 1e-4            # Keep
 
-    scheduler: SchedulerName = "none"
+scheduler = "cosine"           # Change from "none"
 
-    early_stopping: bool = True
-    patience: int = 7
+early_stopping = True          # Keep
+patience = 7                   # Keep
 
-    mixed_precision: bool = True
-    seed: int = 42
+mixed_precision = True         # Keep
+seed = 42                      # Keep
 
-    workers: int = field(default_factory=_default_workers)
+workers = 2                    # Use 2 in Colab
 
 
 @dataclass(frozen=True)
