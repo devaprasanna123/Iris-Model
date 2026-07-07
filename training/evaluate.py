@@ -23,7 +23,15 @@ import torch
 
 from training.config import TrainingConfig
 from training.dataloaders import create_test_loader
-from training.metrics import MetricsSpec, dice_score, iou_score, pixel_accuracy, precision_score, recall_score, f1_score
+from training.metrics import (
+    MetricsSpec,
+    dice_score,
+    iou_score,
+    pixel_accuracy,
+    precision_score,
+    recall_score,
+    f1_score,
+)
 from training.models.unet import UNet
 from training.utils.checkpoint import CheckpointManager
 from training.utils.logger import Logger
@@ -56,13 +64,9 @@ def main() -> None:
 
     # Load checkpoint (best)
     checkpoint_manager = CheckpointManager(
-        cfg.checkpoint.checkpoint_dir,
-        best_model_name=cfg.checkpoint.best_model_name.replace(".pt", ".pth")
-        if cfg.checkpoint.best_model_name.endswith(".pt")
-        else cfg.checkpoint.best_model_name,
-        last_model_name=cfg.checkpoint.last_model_name.replace(".pt", ".pth")
-        if cfg.checkpoint.last_model_name.endswith(".pt")
-        else cfg.checkpoint.last_model_name,
+        checkpoint_dir=cfg.checkpoint.checkpoint_dir,
+        best_model_name=cfg.checkpoint.best_model_name,
+        last_model_name=cfg.checkpoint.last_model_name,
         device=device,
     )
 
@@ -78,7 +82,7 @@ def main() -> None:
     # Test loader
     dataset_root = cfg.dataset.dataset_root
     test_loader = create_test_loader(
-        dataset_path=dataset_root / "test",
+        dataset_path=dataset_root,
         batch_size=int(cfg.training.batch_size),
         num_workers=int(cfg.training.workers),
         shuffle=False,
@@ -128,7 +132,7 @@ def main() -> None:
         "F1": f1_sum / denom,
     }
 
-    print("\n===== Test Metrics (best_model.pth) =====")
+    print("\n===== Test Metrics (best_model.pt) =====")
     for k, v in report.items():
         print(f"{k:>16}: {v:.6f}")
 

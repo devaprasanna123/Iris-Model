@@ -1,10 +1,10 @@
-# MedicalAI - TODO
 
-- [ ] Update `MedicalAI/training/train.py` to remove verification-only single-epoch mode.
-- [ ] Ensure training always uses `cfg.training.epochs` (no hardcoded 1, no verification logger message).
-- [ ] Replace output message `Starting 1-epoch verification training...` with `Starting full training...`.
-- [ ] Add required configuration banner: device, dataset root, batch size, epochs, learning rate, optimizer, scheduler.
-- [ ] Ensure trainer runs for `for epoch in range(cfg.training.epochs)` or equivalent.
-- [ ] Validate no remaining occurrences of verification/epoch=1 overrides in `train.py`.
-- [ ] Commit and push changes.
+# TODO
+
+## MedicalAI/training/evaluate.py - Fix evaluation issues
+- [ ] Plan approved by user
+- [ ] Update CheckpointManager initialization to remove .pt -> .pth conversion and use provided constructor signature
+- [ ] Fix test_loader dataset_path usage and pass batch_size/num_workers/shuffle=False
+- [ ] Update printed header from best_model.pth to best_model.pt
+- [ ] git add/commit/push changes
 
