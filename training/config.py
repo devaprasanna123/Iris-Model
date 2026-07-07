@@ -87,33 +87,35 @@ def _default_workers() -> int:
     return max(0, min(8, cpu_count - 1))
 
 
-@dataclass(frozen=True)
-class DatasetConfig:
-    """Dataset configuration.
+def _default_dataset_root() -> Path:
+    """Pick the dataset root path dynamically.
 
-    dataset_root must point to the dataset folder that contains train/val/test.
-
-    Google Colab compatibility:
-    - If running in Colab and /content/dataset exists, use it.
-    - Else, if /content/drive/MyDrive/MedicalAI_Dataset/dataset exists, use it.
-    - Otherwise fall back to the repo-relative default.
+    Order:
+    1) /content/dataset (Colab)
+    2) /content/drive/MyDrive/MedicalAI_Dataset/dataset (Colab)
+    3) MedicalAI/dataset (repo fallback)
     """
 
-    dataset_root: Path = (
-        Path("/content/dataset")
-        if Path("/content/dataset").exists()
-        else (
-            Path("/content/drive/MyDrive/MedicalAI_Dataset/dataset")
-            if Path("/content/drive/MyDrive/MedicalAI_Dataset/dataset").exists()
-            else Path("MedicalAI") / "dataset"
-        )
-    )
+    candidates = [
+        Path("/content/dataset"),
+        Path("/content/drive/MyDrive/MedicalAI_Dataset/dataset"),
+        Path("MedicalAI") / "dataset",
+    ]
 
-    # Kept for backward compatibility with existing code paths.
-    # IMPORTANT: train/val/test should NOT be appended by callers.
+    for p in candidates:
+        if p.exists():
+            return p
+
+    return candidates[-1]
+
+
+@dataclass(frozen=True)
+class DatasetConfig:
+    dataset_root: Path = field(default_factory=_default_dataset_root)
     train_folder: str = "train"
     val_folder: str = "val"
     test_folder: str = "test"
+
 
 
 
