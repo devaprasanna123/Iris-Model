@@ -121,15 +121,15 @@ class DatasetConfig:
 
 @dataclass(frozen=True)
 class CheckpointConfig:
-    checkpoint_dir: Path = Path("MedicalAI") / "training" / "checkpoints"
+    checkpoint_dir = Path("/content/drive/MyDrive/MedicalAI/checkpoints")
     best_model_name: str = "best_model.pt"
     last_model_name: str = "last_model.pt"
 
 
 @dataclass(frozen=True)
 class LogsConfig:
-    tensorboard_dir: Path = Path("MedicalAI") / "training" / "tensorboard"
-    log_dir: Path = Path("MedicalAI") / "training" / "logs"
+    tensorboard_dir = Path("/content/drive/MyDrive/MedicalAI/logs")
+prediction_dir = Path("/content/drive/MyDrive/MedicalAI/predictions")
 
 
 @dataclass(frozen=True)
