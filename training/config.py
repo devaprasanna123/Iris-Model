@@ -164,22 +164,24 @@ class ImageConfig:
 
 @dataclass
 class TrainingHyperparams:
-   batch_size = 4                 # Keep
-learning_rate = 1e-3           # Keep
-epochs = 30                    # Keep
+    """Training hyperparameters."""
 
-optimizer = "adamw"            # Keep
-weight_decay = 1e-4            # Keep
+    batch_size: int = 4
+    learning_rate: float = 1e-3
+    epochs: int = 30
 
-scheduler = "cosine"           # Change from "none"
+    optimizer: OptimizerName = "adamw"
+    weight_decay: float = 1e-4
 
-early_stopping = True          # Keep
-patience = 7                   # Keep
+    scheduler: SchedulerName = "cosine"
 
-mixed_precision = True         # Keep
-seed = 42                      # Keep
+    early_stopping: bool = True
+    patience: int = 7
 
-workers = 2                    # Use 2 in Colab
+    mixed_precision: bool = True
+    seed: int = 42
+
+    workers: int = 2
 
 
 @dataclass(frozen=True)
