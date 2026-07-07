@@ -89,10 +89,32 @@ def _default_workers() -> int:
 
 @dataclass(frozen=True)
 class DatasetConfig:
-    dataset_root: Path = Path("MedicalAI") / "dataset"
+    """Dataset configuration.
+
+    dataset_root must point to the dataset folder that contains train/val/test.
+
+    Google Colab compatibility:
+    - If running in Colab and /content/dataset exists, use it.
+    - Else, if /content/drive/MyDrive/MedicalAI_Dataset/dataset exists, use it.
+    - Otherwise fall back to the repo-relative default.
+    """
+
+    dataset_root: Path = (
+        Path("/content/dataset")
+        if Path("/content/dataset").exists()
+        else (
+            Path("/content/drive/MyDrive/MedicalAI_Dataset/dataset")
+            if Path("/content/drive/MyDrive/MedicalAI_Dataset/dataset").exists()
+            else Path("MedicalAI") / "dataset"
+        )
+    )
+
+    # Kept for backward compatibility with existing code paths.
+    # IMPORTANT: train/val/test should NOT be appended by callers.
     train_folder: str = "train"
     val_folder: str = "val"
     test_folder: str = "test"
+
 
 
 @dataclass(frozen=True)

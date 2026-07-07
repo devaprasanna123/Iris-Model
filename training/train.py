@@ -24,7 +24,8 @@ import numpy as np
 import torch
 
 from training.config import TrainingConfig
-from training.dataloaders import create_train_loader, create_val_loader
+from training.dataloaders import create_test_loader, create_train_loader, create_val_loader
+
 from training.losses import CombinedLoss
 from training.metrics import MetricsSpec
 from training.models.unet import UNet
@@ -100,27 +101,73 @@ def main() -> None:
     else:
         print(f"CUDA Available: {cuda_available} | Device: {device}")
 
-    # Model
-    model = UNet(in_channels=cfg.image.channels, num_classes=cfg.classes.number_of_classes)
-    model.to(device)
+    # Model (not required for DataLoader-only verification)
+    # model = UNet(in_channels=cfg.image.channels, num_classes=cfg.classes.number_of_classes)
+    # model.to(device)
 
-    # Dataloaders
-    dataset_root = cfg.dataset.dataset_root
+
+    # Dataloaders (verification-only; do not start training)
+    dataset_root = Path(cfg.dataset.dataset_root)
+
+    train_images_path = dataset_root / cfg.dataset.train_folder / "images"
+    train_masks_path = dataset_root / cfg.dataset.train_folder / "masks"
+    val_images_path = dataset_root / cfg.dataset.val_folder / "images"
+    val_masks_path = dataset_root / cfg.dataset.val_folder / "masks"
+    test_images_path = dataset_root / cfg.dataset.test_folder / "images"
+    test_masks_path = dataset_root / cfg.dataset.test_folder / "masks"
+
+    print("===== Dataset Root / Paths =====")
+    print(f"Dataset Root: {dataset_root}")
+    print(f"Train Images Path: {train_images_path}")
+    print(f"Train Masks Path: {train_masks_path}")
+    print(f"Validation Images Path: {val_images_path}")
+    print(f"Validation Masks Path: {val_masks_path}")
+    print(f"Test Images Path: {test_images_path}")
+    print(f"Test Masks Path: {test_masks_path}")
+
+    required_paths = {
+        "Train Images Path": train_images_path,
+        "Train Masks Path": train_masks_path,
+        "Validation Images Path": val_images_path,
+        "Validation Masks Path": val_masks_path,
+        "Test Images Path": test_images_path,
+        "Test Masks Path": test_masks_path,
+    }
+
+    missing = [name for name, p in required_paths.items() if not Path(p).exists()]
+    for name in missing:
+        print(f"MISSING: {name} -> {required_paths[name]}")
+
+    if missing:
+        raise FileNotFoundError(
+            "One or more required dataset directories are missing:\n" + "\n".join(
+                f"- {name}: {required_paths[name]}" for name in missing
+            )
+        )
+
     train_loader = create_train_loader(
-        dataset_path=dataset_root / "train",
+        dataset_path=dataset_root,
         batch_size=int(cfg.training.batch_size),
         num_workers=int(cfg.training.workers),
         shuffle=True,
     )
     val_loader = create_val_loader(
-        dataset_path=dataset_root / "val",
+        dataset_path=dataset_root,
+        batch_size=int(cfg.training.batch_size),
+        num_workers=int(cfg.training.workers),
+        shuffle=False,
+    )
+    test_loader = create_test_loader(
+        dataset_path=dataset_root,
         batch_size=int(cfg.training.batch_size),
         num_workers=int(cfg.training.workers),
         shuffle=False,
     )
 
-    # Loss
-    loss_fn = CombinedLoss(dice_weight=1.0)
+    # Only verify DataLoader initialization.
+    print("===== DataLoader initialization: OK =====")
+    return
+
 
     # Optimizer / scheduler
     optimizer = _create_optimizer(cfg, model)
