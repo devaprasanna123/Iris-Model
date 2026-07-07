@@ -29,7 +29,7 @@ from training.dataloaders import create_test_loader, create_train_loader, create
 from training.losses import CombinedLoss
 from training.metrics import MetricsSpec
 from training.models.unet import UNet
-from training.trainer import Trainer, _set_trainer_num_epochs
+from training.trainer import Trainer
 from training.utils.checkpoint import CheckpointManager
 from training.utils.logger import Logger
 
@@ -101,14 +101,29 @@ def main() -> None:
     else:
         print(f"CUDA Available: {cuda_available} | Device: {device}")
 
-    # Model (not required for DataLoader-only verification)
-    # model = UNet(in_channels=cfg.image.channels, num_classes=cfg.classes.number_of_classes)
-    # model.to(device)
-
-
-    # Dataloaders (verification-only; do not start training)
+    # Dataloaders
     dataset_root = Path(cfg.dataset.dataset_root)
 
+    train_loader = create_train_loader(
+        dataset_path=dataset_root,
+        batch_size=int(cfg.training.batch_size),
+        num_workers=int(cfg.training.workers),
+        shuffle=True,
+    )
+    val_loader = create_val_loader(
+        dataset_path=dataset_root,
+        batch_size=int(cfg.training.batch_size),
+        num_workers=int(cfg.training.workers),
+        shuffle=False,
+    )
+    test_loader = create_test_loader(
+        dataset_path=dataset_root,
+        batch_size=int(cfg.training.batch_size),
+        num_workers=int(cfg.training.workers),
+        shuffle=False,
+    )
+
+    # Verify required dataset paths exist
     train_images_path = dataset_root / cfg.dataset.train_folder / "images"
     train_masks_path = dataset_root / cfg.dataset.train_folder / "masks"
     val_images_path = dataset_root / cfg.dataset.val_folder / "images"
@@ -145,67 +160,20 @@ def main() -> None:
             )
         )
 
-    train_loader = create_train_loader(
-        dataset_path=dataset_root,
-        batch_size=int(cfg.training.batch_size),
-        num_workers=int(cfg.training.workers),
-        shuffle=True,
-    )
-    val_loader = create_val_loader(
-        dataset_path=dataset_root,
-        batch_size=int(cfg.training.batch_size),
-        num_workers=int(cfg.training.workers),
-        shuffle=False,
-    )
-    test_loader = create_test_loader(
-        dataset_path=dataset_root,
-        batch_size=int(cfg.training.batch_size),
-        num_workers=int(cfg.training.workers),
-        shuffle=False,
-    )
-
-    # Only verify DataLoader initialization.
     print("===== DataLoader initialization: OK =====")
 
-    # ============================
-    # Training setup (verification run)
-    # ============================
-    device = torch.device(cfg.device.device)
-
     # Print required training configuration block BEFORE training starts
-    epochs_for_verification = 1
-    print("\n============================")
+    print("\n==================================")
     print("Training Configuration")
-    print("============================")
+    print("==================================")
     print(f"Device: {device}")
     print(f"Dataset Root: {dataset_root}")
     print(f"Batch Size: {int(cfg.training.batch_size)}")
-    print(f"Epochs: {epochs_for_verification}")
+    print(f"Epochs: {int(cfg.training.epochs)}")
     print(f"Learning Rate: {float(cfg.training.learning_rate)}")
-    print(f"Optimizer: AdamW (lr={float(cfg.training.learning_rate)}, weight_decay={float(cfg.training.weight_decay)})")
+    print(f"Optimizer: {str(cfg.training.optimizer).capitalize()}")
     print(f"Scheduler: {str(cfg.training.scheduler).lower()}")
 
-    # Create UNet model
-    model = UNet(in_channels=cfg.image.channels, num_classes=cfg.classes.number_of_classes)
-    model.to(device)
-
-    # Create CombinedLoss
-    loss_fn = CombinedLoss(dice_weight=1.0)
-
-    # Create AdamW optimizer using config values
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(cfg.training.learning_rate),
-        weight_decay=float(cfg.training.weight_decay),
-    )
-
-    # Create learning-rate scheduler (if enabled in config)
-    scheduler = _create_scheduler(cfg, optimizer)
-
-    # Ensure lr scheduler (if any) is consistent with 1-epoch verification
-    # (trainer.fit() will step scheduler each epoch)
-
-    # Logger
     logger = Logger(
         name="MedicalAI.train",
         log_dir=cfg.logs.log_dir,
@@ -214,7 +182,20 @@ def main() -> None:
         enable_file=True,
         use_color=True,
     )
-    logger.info("Starting 1-epoch verification training...")
+    logger.info("Starting full training...")
+
+    # Create UNet model
+    model = UNet(in_channels=cfg.image.channels, num_classes=cfg.classes.number_of_classes)
+    model.to(device)
+
+    # Create CombinedLoss
+    loss_fn = CombinedLoss(dice_weight=1.0)
+
+    # Create optimizer using config values
+    optimizer = _create_optimizer(cfg, model)
+
+    # Create learning-rate scheduler (if enabled in config)
+    scheduler = _create_scheduler(cfg, optimizer)
 
     # Checkpoints (save best_model.pt and last_model.pt)
     checkpoint_manager = CheckpointManager(
@@ -250,18 +231,15 @@ def main() -> None:
         resume_which="last",
     )
 
-    # Force exactly 1 epoch for verification
-    trainer = _set_trainer_num_epochs(trainer, epochs=epochs_for_verification)
-
     result = trainer.fit()
 
     logger.info(
-        "First epoch done. best_dice=%s best_epoch=%s last_epoch=%s",
+        "Training completed. best_dice=%s best_epoch=%s last_epoch=%s",
         result.best_dice,
         result.best_epoch,
         result.last_epoch,
     )
-    print("✅ First training epoch completed successfully.")
+    print("✅ Training completed successfully.")
 
     logger.close()
 
