@@ -1,0 +1,61 @@
+# Python bytecode and caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+
+# Environment variables
+.env
+
+# Editor settings
+.vscode/
+.idea/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Dataset folders
+dataset/
+dataset/images/
+dataset/masks/
+dataset/annotations/
+dataset/train/
+dataset/val/
+dataset/test/
+dataset/statistics/
+dataset/logs/
+dataset/visualization/
+
+# Dataset and model artifacts
+*.bmp
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+*.dcm
+*.pth
+*.pt
+*.onnx
+*.ckpt
+*.engine
+*.zip
+*.rar
+*.7z
+*.npy
+*.npz
+
+# Logs and temporary files
+*.log
+*.tmp
+*.cache
+
+# Training outputs
+training/logs/
+checkpoints/
+outputs/
+runs/
+tensorboard/
