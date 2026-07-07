@@ -126,6 +126,7 @@ class Trainer:
         metrics_spec: MetricsSpec,
         logger: Logger,
         checkpoint_manager: CheckpointManager,
+        num_epochs: int,
         tensorboard_dir: str | Path | None = None,
         mixed_precision: bool = True,
         early_stopping: bool = True,
@@ -143,6 +144,7 @@ class Trainer:
         self.metrics_spec = metrics_spec
         self.logger = logger
         self.checkpoint_manager = checkpoint_manager
+        self.num_epochs = int(num_epochs)
 
         self.mixed_precision = bool(mixed_precision)
         self.scaler = GradScaler(enabled=self.mixed_precision)

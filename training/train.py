@@ -223,6 +223,7 @@ def main() -> None:
         metrics_spec=metrics_spec,
         logger=logger,
         checkpoint_manager=checkpoint_manager,
+        num_epochs=int(cfg.training.epochs),
         tensorboard_dir=tensorboard_dir,
         mixed_precision=bool(cfg.training.mixed_precision),
         early_stopping=bool(cfg.training.early_stopping),

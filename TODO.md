@@ -1,14 +1,10 @@
-# TODO (MedicalAI)
+# MedicalAI - TODO
 
-- [ ] Update `MedicalAI/training/train.py`:
-  - [ ] Remove temporary early `return` after `===== DataLoader initialization: OK =====`
-  - [ ] After DataLoader init: create UNet, move to device, create CombinedLoss
-  - [ ] Create AdamW optimizer from config values
-  - [ ] Create scheduler only if enabled in config
-  - [ ] Print required training configuration block before training starts
-  - [ ] Force exactly 1 epoch verification run
-  - [ ] Initialize Trainer, call `trainer.fit()`
-  - [ ] Ensure epoch-end metrics are printed and checkpoint saves to `best_model.pt` and `last_model.pt`
-  - [ ] Ensure TensorBoard logs are written
-  - [ ] After epoch success, print `✅ First training epoch completed successfully.`
+- [ ] Update `MedicalAI/training/train.py` to remove verification-only single-epoch mode.
+- [ ] Ensure training always uses `cfg.training.epochs` (no hardcoded 1, no verification logger message).
+- [ ] Replace output message `Starting 1-epoch verification training...` with `Starting full training...`.
+- [ ] Add required configuration banner: device, dataset root, batch size, epochs, learning rate, optimizer, scheduler.
+- [ ] Ensure trainer runs for `for epoch in range(cfg.training.epochs)` or equivalent.
+- [ ] Validate no remaining occurrences of verification/epoch=1 overrides in `train.py`.
+- [ ] Commit and push changes.
 
