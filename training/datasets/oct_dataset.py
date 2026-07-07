@@ -18,20 +18,27 @@ LABEL_TO_ID: dict[str, int] = {
 }
 
 
+# Default training image size required by the task.
+IMAGE_HEIGHT = 512
+IMAGE_WIDTH = 512
+
+
 @dataclass(frozen=True)
 class OctDatasetConfig:
     """Configuration for the OCT segmentation dataset.
 
     Notes:
-        - No resizing
+        - Deterministic preprocessing only (resize to fixed training size)
         - No augmentation
-        - No normalization besides dividing the image by 255
-        - Masks are kept as grayscale int IDs
+        - Image normalization besides dividing by 255
+        - Masks are kept as grayscale int IDs: 0/1/2
     """
 
     images_dir: Path
     masks_dir: Path
     image_extensions: Tuple[str, ...] = (".bmp",)
+    image_height: int = IMAGE_HEIGHT
+    image_width: int = IMAGE_WIDTH
 
 
 class OctDataset(Dataset):
@@ -51,6 +58,8 @@ class OctDataset(Dataset):
 
         - image: torch.FloatTensor of shape (3, H, W), values in [0, 1]
         - mask:  torch.LongTensor of shape (H, W), values in {0, 1, 2}
+
+    Where H/W are fixed to (IMAGE_HEIGHT, IMAGE_WIDTH) via resizing.
     """
 
     def __init__(
@@ -60,6 +69,8 @@ class OctDataset(Dataset):
         *,
         strict_pairing: bool = True,
         transform: Optional[Callable[[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]] = None,
+        image_height: int = IMAGE_HEIGHT,
+        image_width: int = IMAGE_WIDTH,
     ) -> None:
         """Create the dataset.
 
@@ -70,9 +81,16 @@ class OctDataset(Dataset):
             transform: Optional callable applied to (image, mask) tensors.
                       This is intentionally not used for augmentation; it can be
                       used only for deterministic preprocessing.
+            image_height: Output image height after resize.
+            image_width: Output image width after resize.
         """
 
-        cfg = OctDatasetConfig(images_dir=Path(images_dir), masks_dir=Path(masks_dir))
+        cfg = OctDatasetConfig(
+            images_dir=Path(images_dir),
+            masks_dir=Path(masks_dir),
+            image_height=image_height,
+            image_width=image_width,
+        )
         self._cfg = cfg
         self._strict_pairing = strict_pairing
         self._transform = transform
@@ -167,16 +185,70 @@ class OctDataset(Dataset):
 
         # Image: BMP -> RGB -> float32 -> /255
         img_rgb = self._load_bmp_rgb(img_path)
+        img_rgb = cv2.resize(
+            img_rgb,
+            (self._cfg.image_width, self._cfg.image_height),
+            interpolation=cv2.INTER_LINEAR,
+        )
         img_rgb = img_rgb.astype(np.float32) / 255.0
         # (H,W,3) -> (3,H,W)
-        img_tensor = torch.from_numpy(np.transpose(img_rgb, (2, 0, 1))).contiguous()
+        image = np.transpose(img_rgb, (2, 0, 1))
+        image = np.ascontiguousarray(image)
+        img_tensor = torch.from_numpy(image).contiguous()
 
         # Mask: PNG -> grayscale -> int64
         mask = self._load_mask_grayscale(mask_path)
-        mask_tensor = torch.from_numpy(mask.astype(np.int64)).contiguous()
+        mask = cv2.resize(
+            mask,
+            (self._cfg.image_width, self._cfg.image_height),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        mask = np.ascontiguousarray(mask)
+        mask_tensor = torch.from_numpy(mask.astype(np.int64, copy=False)).contiguous()
 
         if self._transform is not None:
             img_tensor, mask_tensor = self._transform(img_tensor, mask_tensor)
 
         return img_tensor, mask_tensor
+
+
+def _self_test_first_five_samples() -> None:
+    """Print shapes/dtypes for the first five samples.
+
+    This is meant as a quick runtime validation that the dataset now returns
+    fixed-size tensors compatible with the DataLoader.
+    """
+
+    # Use the repo-typical default dataset layout.
+    # This file is only modified by the task; we avoid touching training code.
+    dataset_root = Path("MedicalAI") / "dataset"
+    train_images_dir = dataset_root / "train" / "images"
+    train_masks_dir = dataset_root / "train" / "masks"
+
+    if not train_images_dir.exists() or not train_masks_dir.exists():
+        print(
+            "[OctDataset self-test] Skipped: expected dataset paths not found. "
+            f"images={train_images_dir} masks={train_masks_dir}"
+        )
+        return
+
+    ds = OctDataset(train_images_dir, train_masks_dir)
+    n = min(5, len(ds))
+    for i in range(n):
+        img, mask = ds[i]
+        print(
+            f"[sample {i}] "
+            f"Image: {tuple(img.shape)} dtype={img.dtype} ; "
+            f"Mask: {tuple(mask.shape)} dtype={mask.dtype}"
+        )
+
+        # Hard assertions for the required contract.
+        assert tuple(img.shape) == (3, IMAGE_HEIGHT, IMAGE_WIDTH)
+        assert img.dtype == torch.float32
+        assert tuple(mask.shape) == (IMAGE_HEIGHT, IMAGE_WIDTH)
+        assert mask.dtype == torch.int64
+
+
+if __name__ == "__main__":
+    _self_test_first_five_samples()
 
