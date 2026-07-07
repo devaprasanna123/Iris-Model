@@ -128,8 +128,8 @@ class CheckpointConfig:
 
 @dataclass(frozen=True)
 class LogsConfig:
-    tensorboard_dir = Path("/content/drive/MyDrive/MedicalAI/logs")
-prediction_dir = Path("/content/drive/MyDrive/MedicalAI/predictions")
+    log_dir: Path = Path("MedicalAI") / "training" / "logs"
+    tensorboard_dir: Path = Path("MedicalAI") / "training" / "tensorboard"
 
 
 @dataclass(frozen=True)
