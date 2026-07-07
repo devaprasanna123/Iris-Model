@@ -1,0 +1,7 @@
+{
+  "seed": 42,
+  "total_pairs": 1167,
+  "train": 934,
+  "val": 117,
+  "test": 116
+}
