@@ -166,12 +166,44 @@ def main() -> None:
 
     # Only verify DataLoader initialization.
     print("===== DataLoader initialization: OK =====")
-    return
 
+    # ============================
+    # Training setup (verification run)
+    # ============================
+    device = torch.device(cfg.device.device)
 
-    # Optimizer / scheduler
-    optimizer = _create_optimizer(cfg, model)
+    # Print required training configuration block BEFORE training starts
+    epochs_for_verification = 1
+    print("\n============================")
+    print("Training Configuration")
+    print("============================")
+    print(f"Device: {device}")
+    print(f"Dataset Root: {dataset_root}")
+    print(f"Batch Size: {int(cfg.training.batch_size)}")
+    print(f"Epochs: {epochs_for_verification}")
+    print(f"Learning Rate: {float(cfg.training.learning_rate)}")
+    print(f"Optimizer: AdamW (lr={float(cfg.training.learning_rate)}, weight_decay={float(cfg.training.weight_decay)})")
+    print(f"Scheduler: {str(cfg.training.scheduler).lower()}")
+
+    # Create UNet model
+    model = UNet(in_channels=cfg.image.channels, num_classes=cfg.classes.number_of_classes)
+    model.to(device)
+
+    # Create CombinedLoss
+    loss_fn = CombinedLoss(dice_weight=1.0)
+
+    # Create AdamW optimizer using config values
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(cfg.training.learning_rate),
+        weight_decay=float(cfg.training.weight_decay),
+    )
+
+    # Create learning-rate scheduler (if enabled in config)
     scheduler = _create_scheduler(cfg, optimizer)
+
+    # Ensure lr scheduler (if any) is consistent with 1-epoch verification
+    # (trainer.fit() will step scheduler each epoch)
 
     # Logger
     logger = Logger(
@@ -182,18 +214,13 @@ def main() -> None:
         enable_file=True,
         use_color=True,
     )
+    logger.info("Starting 1-epoch verification training...")
 
-    logger.info("Starting training...")
-
-    # Checkpoints
+    # Checkpoints (save best_model.pt and last_model.pt)
     checkpoint_manager = CheckpointManager(
         cfg.checkpoint.checkpoint_dir,
-        best_model_name=cfg.checkpoint.best_model_name.replace(".pt", ".pth")
-        if cfg.checkpoint.best_model_name.endswith(".pt")
-        else cfg.checkpoint.best_model_name,
-        last_model_name=cfg.checkpoint.last_model_name.replace(".pt", ".pth")
-        if cfg.checkpoint.last_model_name.endswith(".pt")
-        else cfg.checkpoint.last_model_name,
+        best_model_name="best_model.pt",
+        last_model_name="last_model.pt",
         device=device,
     )
 
@@ -204,7 +231,6 @@ def main() -> None:
 
     # Trainer
     metrics_spec = MetricsSpec(num_classes=cfg.classes.number_of_classes)
-
     trainer = Trainer(
         model=model,
         train_loader=train_loader,
@@ -224,12 +250,18 @@ def main() -> None:
         resume_which="last",
     )
 
-    trainer = _set_trainer_num_epochs(trainer, epochs=int(cfg.training.epochs))
+    # Force exactly 1 epoch for verification
+    trainer = _set_trainer_num_epochs(trainer, epochs=epochs_for_verification)
 
     result = trainer.fit()
 
-    logger.info("Training complete. best_dice=%s best_epoch=%s last_epoch=%s", result.best_dice, result.best_epoch, result.last_epoch)
-    print(f"Training complete. best_dice={result.best_dice:.6f} best_epoch={result.best_epoch} last_epoch={result.last_epoch}")
+    logger.info(
+        "First epoch done. best_dice=%s best_epoch=%s last_epoch=%s",
+        result.best_dice,
+        result.best_epoch,
+        result.last_epoch,
+    )
+    print("✅ First training epoch completed successfully.")
 
     logger.close()
 
