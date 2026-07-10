@@ -145,15 +145,12 @@ def main() -> None:
     model.to(device)
 
     checkpoint_manager = CheckpointManager(
-        cfg.checkpoint.checkpoint_dir,
-        best_model_name=cfg.checkpoint.best_model_name.replace(".pt", ".pth")
-        if cfg.checkpoint.best_model_name.endswith(".pt")
-        else cfg.checkpoint.best_model_name,
-        last_model_name=cfg.checkpoint.last_model_name.replace(".pt", ".pth")
-        if cfg.checkpoint.last_model_name.endswith(".pt")
-        else cfg.checkpoint.last_model_name,
+        checkpoint_dir=cfg.checkpoint.checkpoint_dir,
+        best_model_name=cfg.checkpoint.best_model_name,
+        last_model_name=cfg.checkpoint.last_model_name,
         device=device,
     )
+
 
     checkpoint_manager.load(model=model, optimizer=None, scheduler=None, which="best", strict=True)
 
