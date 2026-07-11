@@ -47,14 +47,32 @@ def _read_image_cv2(path: Path) -> np.ndarray:
         raise FileNotFoundError(f"Failed to read image: {path}")
     return img
 
+def _to_tensor_rgb01(
+    bgr_img: np.ndarray,
+    image_size: tuple[int, int] = (512, 512),
+) -> torch.Tensor:
+    """
+    Convert OpenCV BGR image to RGB tensor (1,3,512,512)
+    using exactly the same preprocessing as training.
+    """
 
-def _to_tensor_rgb01(bgr_img: np.ndarray) -> torch.Tensor:
-    """Convert BGR OpenCV image to torch float tensor (1,3,H,W) in RGB [0,1]."""
+    # Resize exactly like OctDataset
+    bgr_img = cv2.resize(
+        bgr_img,
+        image_size,
+        interpolation=cv2.INTER_LINEAR,
+    )
 
     rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
-    rgb_f = rgb.astype(np.float32) / 255.0
-    chw = np.transpose(rgb_f, (2, 0, 1))
-    tensor = torch.from_numpy(chw).unsqueeze(0).contiguous()
+
+    rgb = rgb.astype(np.float32) / 255.0
+
+    rgb = np.transpose(rgb, (2, 0, 1))
+
+    rgb = np.ascontiguousarray(rgb)
+
+    tensor = torch.from_numpy(rgb).unsqueeze(0).float()
+
     return tensor
 
 
@@ -93,9 +111,23 @@ def predict_one(
     with torch.no_grad():
         logits = model(inp)
         pred_mask = logits.argmax(dim=1).squeeze(0).to(torch.uint8).cpu().numpy()
+        print("Prediction Shape :", pred_mask.shape)
+        print("Classes Present :", np.unique(pred_mask))
 
-    colored = _colorize_mask(pred_mask)
-    overlay = _overlay(bgr, colored, alpha=0.5)
+ # Resize original image to match prediction
+bgr = cv2.resize(
+    bgr,
+    (512, 512),
+    interpolation=cv2.INTER_LINEAR,
+)
+
+colored = _colorize_mask(pred_mask)
+
+overlay = _overlay(
+    bgr,
+    colored,
+    alpha=0.5,
+)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = image_path.stem
@@ -130,7 +162,7 @@ def main() -> None:
     parser.add_argument(
         "--output_dir",
         type=str,
-        default=str(Path("outputs") / "predictions"),
+        default=str(Path("MedicalAI") / "training" / "predictions"),
         help="Output directory for prediction artifacts",
     )
     args = parser.parse_args()
