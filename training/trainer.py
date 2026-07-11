@@ -291,6 +291,8 @@ class Trainer:
             desc = f"Epoch {epoch} [train]"
         else:
             self.model.eval()
+            loader = self.val_loader
+            desc = f"Epoch {epoch} [val]"
 
         total_loss = 0.0
         num_batches = 0
