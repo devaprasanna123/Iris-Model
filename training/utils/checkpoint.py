@@ -16,6 +16,7 @@ Only standard library modules + torch are used.
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +36,9 @@ class CheckpointMetadata:
     best_dice: float
     training_config: Dict[str, Any]
     timestamp: str
+    git_commit: Optional[str] = None
+    training_duration_s: Optional[float] = None
+    metrics: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -45,6 +49,9 @@ class CheckpointMetadata:
             "best_dice": float(self.best_dice),
             "training_config": self.training_config,
             "timestamp": self.timestamp,
+            "git_commit": self.git_commit,
+            "training_duration_s": self.training_duration_s,
+            "metrics": self.metrics,
         }
 
 
@@ -65,6 +72,9 @@ class CheckpointManager:
         best_model_name: str = "best_model.pth",
         last_model_name: str = "last_model.pth",
         device: Optional[torch.device | str] = None,
+        top_k: int = 5,
+        save_every: Optional[int] = 10,
+        keep_periodic: int = 5,
     ) -> None:
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -77,6 +87,14 @@ class CheckpointManager:
             self._map_location = None
         else:
             self._map_location = str(device)
+        # Top-K best checkpoints to keep (by dice)
+        self.top_k = int(top_k)
+        # Save periodic epoch snapshots every N epochs (None to disable)
+        self.save_every = int(save_every) if save_every is not None else None
+        # How many periodic snapshots to keep
+        self.keep_periodic = int(keep_periodic)
+        # Index file keeping track of best checkpoints
+        self._best_index_path = self.checkpoint_dir / "best_index.json"
 
     def exists(self, which: str = "last") -> bool:
         """Check whether a checkpoint exists.
@@ -119,17 +137,89 @@ class CheckpointManager:
         model: torch.nn.Module,
         optimizer: Optional[torch.optim.Optimizer],
         scheduler: Optional[Any],
+        scaler: Optional[Any] = None,
         metadata: CheckpointMetadata,
         extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
+            "checkpoint_version": 2,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
             "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+            "scaler_state_dict": scaler.state_dict() if scaler is not None and hasattr(scaler, "state_dict") else None,
             "metadata": metadata.to_dict(),
             "extra": extra or {},
         }
+
         return payload
+
+    def _get_git_commit(self) -> Optional[str]:
+        try:
+            # Attempt to get short commit hash
+            p = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True)
+            return p.stdout.strip()
+        except Exception:
+            return None
+
+    def _read_best_index(self) -> Dict[str, Any]:
+        if not self._best_index_path.exists():
+            return {}
+        try:
+            with open(self._best_index_path, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except Exception:
+            return {}
+
+    def _write_best_index(self, index: Dict[str, Any]) -> None:
+        try:
+            with open(self._best_index_path, "w", encoding="utf-8") as fh:
+                json.dump(index, fh, indent=2)
+        except Exception:
+            pass
+
+    def _prune_bests(self) -> None:
+        index = self._read_best_index()
+        if not index:
+            return
+        # index maps filename -> {"epoch": int, "dice": float, "path": str}
+        items = list(index.items())
+        # sort by dice desc
+        items.sort(key=lambda it: float(it[1].get("dice", 0.0)), reverse=True)
+        to_keep = items[: self.top_k]
+        keep_names = {name for name, _ in to_keep}
+        # delete others
+        for name, meta in items[self.top_k :]:
+            p = Path(meta.get("path", ""))
+            try:
+                if p.exists():
+                    p.unlink()
+            except Exception:
+                pass
+            index.pop(name, None)
+        # rewrite index
+        self._write_best_index(index)
+
+    def _prune_periodic(self) -> None:
+        # keep only newest `keep_periodic` epoch_*.pt files
+        pattern = "epoch_*.pt"
+        files = list(self.checkpoint_dir.glob(pattern))
+        if not files:
+            return
+        # sort by epoch number parsed from filename
+        def _epoch_from_path(p: Path) -> int:
+            try:
+                name = p.stem  # e.g., 'epoch_10'
+                parts = name.split("_")
+                return int(parts[1])
+            except Exception:
+                return 0
+
+        files.sort(key=_epoch_from_path, reverse=True)
+        for p in files[self.keep_periodic :]:
+            try:
+                p.unlink()
+            except Exception:
+                pass
 
     def save_best(
         self,
@@ -137,6 +227,7 @@ class CheckpointManager:
         model: torch.nn.Module,
         optimizer: Optional[torch.optim.Optimizer],
         scheduler: Optional[Any] = None,
+        scaler: Optional[Any] = None,
         epoch: int,
         train_loss: float,
         val_loss: float,
@@ -149,6 +240,7 @@ class CheckpointManager:
         """Save checkpoint to ``best_model.pth``."""
 
         ts = timestamp or datetime.now().isoformat()
+        git_commit = self._get_git_commit()
         metadata = CheckpointMetadata(
             epoch=epoch,
             train_loss=train_loss,
@@ -157,18 +249,46 @@ class CheckpointManager:
             best_dice=best_dice,
             training_config=training_config,
             timestamp=ts,
+            git_commit=git_commit,
+            training_duration_s=extra.get("training_duration_s") if isinstance(extra, dict) and "training_duration_s" in extra else None,
+            metrics=extra.get("metrics") if isinstance(extra, dict) and "metrics" in extra else None,
         )
 
         payload = self._build_payload(
             model=model,
             optimizer=optimizer,
             scheduler=scheduler,
+            scaler=scaler,
             metadata=metadata,
             extra=extra,
         )
 
-        torch.save(payload, self.best_model_path)
-        return self.best_model_path
+        # Save a named best file (best_epoch_{epoch}.pt) and also update legacy best_model file
+        best_epoch_path = self.checkpoint_dir / f"best_epoch_{epoch}.pt"
+        try:
+            torch.save(payload, best_epoch_path)
+        except Exception:
+            # fallback to .pth
+            best_epoch_path = self.checkpoint_dir / f"best_epoch_{epoch}.pth"
+            torch.save(payload, best_epoch_path)
+
+        # update best model (legacy path)
+        try:
+            torch.save(payload, self.best_model_path)
+        except Exception:
+            pass
+
+        # update best index and prune
+        try:
+            index = self._read_best_index()
+            entry_name = best_epoch_path.name
+            index[entry_name] = {"epoch": int(epoch), "dice": float(dice), "path": str(best_epoch_path), "timestamp": ts}
+            self._write_best_index(index)
+            self._prune_bests()
+        except Exception:
+            pass
+
+        return best_epoch_path
 
     def save_last(
         self,
@@ -176,6 +296,7 @@ class CheckpointManager:
         model: torch.nn.Module,
         optimizer: Optional[torch.optim.Optimizer],
         scheduler: Optional[Any] = None,
+        scaler: Optional[Any] = None,
         epoch: int,
         train_loss: float,
         val_loss: float,
@@ -188,6 +309,7 @@ class CheckpointManager:
         """Save checkpoint to ``last_model.pth``."""
 
         ts = timestamp or datetime.now().isoformat()
+        git_commit = self._get_git_commit()
         metadata = CheckpointMetadata(
             epoch=epoch,
             train_loss=train_loss,
@@ -196,17 +318,44 @@ class CheckpointManager:
             best_dice=best_dice,
             training_config=training_config,
             timestamp=ts,
+            git_commit=git_commit,
+            training_duration_s=extra.get("training_duration_s") if isinstance(extra, dict) and "training_duration_s" in extra else None,
+            metrics=extra.get("metrics") if isinstance(extra, dict) and "metrics" in extra else None,
         )
 
         payload = self._build_payload(
             model=model,
             optimizer=optimizer,
             scheduler=scheduler,
+            scaler=scaler,
             metadata=metadata,
             extra=extra,
         )
 
-        torch.save(payload, self.last_model_path)
+        # Save last (legacy path)
+        try:
+            torch.save(payload, self.last_model_path)
+        except Exception:
+            pass
+
+        # Periodic snapshot if configured
+        periodic_path = None
+        try:
+            if self.save_every is not None and self.save_every > 0 and (epoch % self.save_every == 0):
+                periodic_path = self.checkpoint_dir / f"epoch_{epoch}.pt"
+                try:
+                    torch.save(payload, periodic_path)
+                except Exception:
+                    periodic_path = self.checkpoint_dir / f"epoch_{epoch}.pth"
+                    torch.save(payload, periodic_path)
+                # prune older periodic snapshots
+                try:
+                    self._prune_periodic()
+                except Exception:
+                    pass
+        except Exception:
+            periodic_path = None
+
         return self.last_model_path
 
     def load(
@@ -215,6 +364,7 @@ class CheckpointManager:
         model: torch.nn.Module,
         optimizer: Optional[torch.optim.Optimizer] = None,
         scheduler: Optional[Any] = None,
+        scaler: Optional[Any] = None,
         which: str = "last",
         strict: bool = True,
     ) -> Tuple[CheckpointMetadata, Dict[str, Any]]:
@@ -248,6 +398,14 @@ class CheckpointManager:
         if scheduler is not None and sch_sd is not None:
             scheduler.load_state_dict(sch_sd)
 
+        sca_sd = checkpoint.get("scaler_state_dict")
+        if scaler is not None and sca_sd is not None and hasattr(scaler, "load_state_dict"):
+            try:
+                scaler.load_state_dict(sca_sd)
+            except Exception:
+                # Non-fatal: if scaler state can't be loaded, continue without failing resume
+                pass
+
         md_raw = checkpoint.get("metadata", {})
         metadata = CheckpointMetadata(
             epoch=int(md_raw.get("epoch", 0)),
@@ -257,6 +415,9 @@ class CheckpointManager:
             best_dice=float(md_raw.get("best_dice", 0.0)),
             training_config=dict(md_raw.get("training_config", {})),
             timestamp=str(md_raw.get("timestamp", "")),
+            git_commit=md_raw.get("git_commit"),
+            training_duration_s=md_raw.get("training_duration_s"),
+            metrics=md_raw.get("metrics"),
         )
 
         extra = dict(checkpoint.get("extra", {}))

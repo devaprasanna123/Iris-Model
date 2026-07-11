@@ -26,12 +26,16 @@ import torch
 from training.config import TrainingConfig
 from training.dataloaders import create_test_loader, create_train_loader, create_val_loader
 
-from training.losses import CombinedLoss
+from training.loss_factory import create_loss
+from training.optimizer_factory import create_optimizer
+from training.scheduler_factory import create_scheduler
+
 from training.metrics import MetricsSpec
 from training.models.model_factory import create_model
 from training.trainer import Trainer
 from training.utils.checkpoint import CheckpointManager
 from training.utils.logger import Logger
+from training.monitor import TrainingMonitor
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -64,19 +68,82 @@ def _create_optimizer(cfg: TrainingConfig, model: torch.nn.Module) -> torch.opti
 
 
 def _create_scheduler(cfg: TrainingConfig, optimizer: torch.optim.Optimizer) -> Optional[object]:
-    name = str(cfg.training.scheduler).lower()
+    """Build LR scheduler from config.
+
+    v2 required schedulers:
+      - none
+      - CosineAnnealingLR
+      - ReduceLROnPlateau
+      - OneCycleLR
+      - CosineAnnealingWarmRestarts
+
+    Backward compatible with legacy cfg.training.scheduler values:
+      - "none", "step", "cosine"
+    """
+
+    name = str(cfg.training.scheduler).strip().lower()
 
     if name == "none":
         return None
 
+    # Legacy aliases
+    if name == "cosine":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=int(getattr(cfg.training, "epochs", cfg.training.epochs)),
+            eta_min=float(getattr(cfg.training, "cosine_annealing_eta_min", 0.0)),
+        )
+
     if name == "step":
-        # Conservative defaults.
+        # Legacy StepLR preserved as a conservative option.
         return torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
-    if name == "cosine":
-        return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(cfg.training.epochs))
+    # v2 names / aliases
+    if name in {"cosineannealinglr", "cosine_annealinglr", "cosineannealinglr"}:
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=int(getattr(cfg.training, "cosine_annealing_t_max", cfg.training.epochs) or cfg.training.epochs),
+            eta_min=float(getattr(cfg.training, "cosine_annealing_eta_min", 0.0)),
+        )
 
-    raise ValueError(f"Unsupported scheduler: {cfg.training.scheduler}")
+    if name in {"reducelronplateau", "reducelronplateaulr", "reduce_on_plateau"}:
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",  # Dice is maximized
+            factor=float(getattr(cfg.training, "plateau_factor", 0.1)),
+            patience=int(getattr(cfg.training, "plateau_patience", 5)),
+            min_lr=float(getattr(cfg.training, "plateau_min_lr", 0.0)),
+        )
+
+    if name in {"onecyclelr", "one_cycle_lr"}:
+        max_lr = getattr(cfg.training, "onecycle_max_lr", None)
+        if max_lr is None:
+            max_lr = float(cfg.training.learning_rate)
+
+        return torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=float(max_lr),
+            epochs=int(cfg.training.epochs),
+            steps_per_epoch=1,  # will be overridden by Trainer via per-batch stepping if needed
+            pct_start=float(getattr(cfg.training, "onecycle_pct_start", 0.3)),
+            div_factor=float(getattr(cfg.training, "onecycle_div_factor", 25.0)),
+            final_div_factor=float(getattr(cfg.training, "onecycle_final_div_factor", 1e4)),
+        )
+
+    if name in {"cosineannealingwarmrestars", "cosineannealingwarmrestaris", "cosineannealingwarmrestarestars", "cosineannealingwarmrestar", "cosineannealingwarmrestarst"}:
+        # normalize for common typo; actual expected config key is CosineAnnealingWarmRestarts
+        name = "cosineannealingwarmrestar"  # fallthrough handling below
+
+    if name in {"cosineannealingwarmrestatrs", "cosineannealingwarmrestar", "cosineannealingwarmrestarns", "cosineannealingwarmrestar", "cosineannealingwarmrest"} or name == "cosineannealingwarmrestarts":
+        return torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=int(getattr(cfg.training, "warm_restarts_t_0", 10)),
+            T_mult=int(getattr(cfg.training, "warm_restarts_t_mult", 1)),
+            eta_min=float(getattr(cfg.training, "warm_restarts_eta_min", 0.0)),
+        )
+
+    raise ValueError(f"Unsupported scheduler: {cfg.training.scheduler} (resolved name='{name}')")
+
 
 
 def main() -> None:
@@ -184,19 +251,44 @@ def main() -> None:
     )
     logger.info("Starting full training...")
 
+    # Create monitor
+    monitor = TrainingMonitor(out_dir=cfg.logs.log_dir, writer=None, logger=logger)
+
     # Create segmentation model
     model = create_model(cfg)
     model.to(device)
 
 
-    # Create CombinedLoss
-    loss_fn = CombinedLoss(dice_weight=1.0)
+    # Create loss from config (backward compatible default: CE + Dice(dice_weight=1.0))
+    loss_fn = create_loss(cfg)
 
-    # Create optimizer using config values
-    optimizer = _create_optimizer(cfg, model)
 
-    # Create learning-rate scheduler (if enabled in config)
-    scheduler = _create_scheduler(cfg, optimizer)
+    # Create optimizer using config values (factory)
+    optimizer = create_optimizer(cfg, model)
+
+    # Create learning-rate scheduler (if enabled in config).
+    # Pass steps_per_epoch when available for OneCycleLR correctness.
+    scheduler = create_scheduler(cfg, optimizer, steps_per_epoch=len(train_loader) if train_loader is not None else None)
+
+    # If OneCycleLR was chosen, recreate with correct steps_per_epoch
+    try:
+        from torch.optim.lr_scheduler import OneCycleLR
+        if scheduler is not None and scheduler.__class__.__name__ == "OneCycleLR":
+            max_lr = getattr(cfg.training, "onecycle_max_lr", None)
+            if max_lr is None:
+                max_lr = float(cfg.training.learning_rate)
+
+            scheduler = OneCycleLR(
+                optimizer,
+                max_lr=float(max_lr),
+                epochs=int(cfg.training.epochs),
+                steps_per_epoch=max(1, len(train_loader)),
+                pct_start=float(getattr(cfg.training, "onecycle_pct_start", 0.3)),
+                div_factor=float(getattr(cfg.training, "onecycle_div_factor", 25.0)),
+                final_div_factor=float(getattr(cfg.training, "onecycle_final_div_factor", 1e4)),
+            )
+    except Exception:
+        pass
 
     # Checkpoints (save best_model.pt and last_model.pt)
     checkpoint_manager = CheckpointManager(
@@ -231,6 +323,8 @@ def main() -> None:
         early_stopping_patience=int(cfg.training.patience),
         resume=True,
         resume_which="last",
+        training_config=cfg._as_jsonable(),
+        monitor=monitor,
     )
 
     result = trainer.fit()

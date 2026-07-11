@@ -24,7 +24,23 @@ import torch
 
 
 OptimizerName = Literal["adam", "sgd", "adamw"]
-SchedulerName = Literal["none", "step", "cosine"]
+
+# v2 scheduler names (keep legacy values working)
+SchedulerName = Literal[
+    "none",
+    "step",
+    "cosine",
+    "CosineAnnealingLR",
+    "ReduceLROnPlateau",
+    "OneCycleLR",
+    "CosineAnnealingWarmRestarts",
+    # normalized aliases
+    "cosineannealinglr",
+    "reducelronplateau",
+    "onecyclelr",
+    "cosineannealingwarmrestars",
+]
+
 
 
 def _detect_device() -> Dict[str, Any]:
@@ -208,7 +224,60 @@ class TrainingHyperparams:
     optimizer: OptimizerName = "adamw"
     weight_decay: float = 1e-4
 
+    # Scheduler name (v2). Legacy values ("cosine"/"step"/"none") still work.
     scheduler: SchedulerName = "cosine"
+
+    # -------- Loss (v2) --------
+    # Defaults match current behavior: CE + dice(weight=1.0)
+    loss_name: str = "dice_cross_entropy"
+    dice_weight: float = 1.0
+
+    # Dice internals (optional)
+    dice_smooth: float = 1.0
+    dice_eps: float = 1e-7
+
+    # Weighted CE internals (optional)
+    weighted_ce_class_weights: Tuple[float, ...] | None = None
+
+    # Focal
+    focal_gamma: float = 2.0
+    focal_alpha: float | Tuple[float, ...] | None = None
+
+    # Tversky
+    tversky_alpha: float = 0.5
+    tversky_beta: float = 0.5
+    tversky_smooth: float = 1.0
+
+    # -------- Grad clipping (v2) --------
+    grad_clip_enabled: bool = False
+    grad_clip_max_norm: float = 1.0
+
+    # -------- ReduceLROnPlateau target (v2) --------
+    # which metric to pass to scheduler.step(val_metric)
+    lr_plateau_metric: str = "val_dice_mean"  # or: "val_loss"
+
+    # -------- Optimizer/scheduler extra params (v2, best-effort defaults) --------
+    sgd_momentum: float = 0.9
+
+    # CosineAnnealingLR
+    cosine_annealing_t_max: int | None = None
+    cosine_annealing_eta_min: float = 0.0
+
+    # ReduceLROnPlateau
+    plateau_factor: float = 0.1
+    plateau_patience: int = 5
+    plateau_min_lr: float = 0.0
+
+    # OneCycleLR
+    onecycle_max_lr: float | None = None
+    onecycle_pct_start: float = 0.3
+    onecycle_div_factor: float = 25.0
+    onecycle_final_div_factor: float = 1e4
+
+    # CosineAnnealingWarmRestarts
+    warm_restarts_t_0: int = 10
+    warm_restarts_t_mult: int = 1
+    warm_restarts_eta_min: float = 0.0
 
     early_stopping: bool = True
     patience: int = 7
@@ -217,6 +286,7 @@ class TrainingHyperparams:
     seed: int = 42
 
     workers: int = 2
+
 
 
 @dataclass(frozen=True)
@@ -349,6 +419,7 @@ class TrainingConfig:
         )
 
         training_raw = data["training"]
+        # Backward compatible: new fields may be missing in older config.json
         training = TrainingHyperparams(
             batch_size=int(training_raw["batch_size"]),
             learning_rate=float(training_raw["learning_rate"]),
@@ -356,12 +427,44 @@ class TrainingConfig:
             optimizer=training_raw["optimizer"],
             weight_decay=float(training_raw["weight_decay"]),
             scheduler=training_raw["scheduler"],
-            early_stopping=bool(training_raw["early_stopping"]),
-            patience=int(training_raw["patience"]),
-            mixed_precision=bool(training_raw["mixed_precision"]),
-            seed=int(training_raw["seed"]),
-            workers=int(training_raw["workers"]),
+            # legacy fields
+            early_stopping=bool(training_raw.get("early_stopping", True)),
+            patience=int(training_raw.get("patience", 7)),
+            mixed_precision=bool(training_raw.get("mixed_precision", True)),
+            seed=int(training_raw.get("seed", 42)),
+            workers=int(training_raw.get("workers", 2)),
+            # v2 loss fields
+            loss_name=training_raw.get("loss_name", "dice_cross_entropy"),
+            dice_weight=float(training_raw.get("dice_weight", 1.0)),
+            dice_smooth=float(training_raw.get("dice_smooth", 1.0)),
+            dice_eps=float(training_raw.get("dice_eps", 1e-7)),
+            weighted_ce_class_weights=tuple(training_raw["weighted_ce_class_weights"]) if training_raw.get("weighted_ce_class_weights") is not None else None,
+            focal_gamma=float(training_raw.get("focal_gamma", 2.0)),
+            focal_alpha=training_raw.get("focal_alpha", None),
+            tversky_alpha=float(training_raw.get("tversky_alpha", 0.5)),
+            tversky_beta=float(training_raw.get("tversky_beta", 0.5)),
+            tversky_smooth=float(training_raw.get("tversky_smooth", 1.0)),
+            # v2 grad-clip
+            grad_clip_enabled=bool(training_raw.get("grad_clip_enabled", False)),
+            grad_clip_max_norm=float(training_raw.get("grad_clip_max_norm", 1.0)),
+            # lr plateau
+            lr_plateau_metric=training_raw.get("lr_plateau_metric", "val_dice_mean"),
+            # extras
+            sgd_momentum=float(training_raw.get("sgd_momentum", 0.9)),
+            cosine_annealing_t_max=training_raw.get("cosine_annealing_t_max", None),
+            cosine_annealing_eta_min=float(training_raw.get("cosine_annealing_eta_min", 0.0)),
+            plateau_factor=float(training_raw.get("plateau_factor", 0.1)),
+            plateau_patience=int(training_raw.get("plateau_patience", 5)),
+            plateau_min_lr=float(training_raw.get("plateau_min_lr", 0.0)),
+            onecycle_max_lr=training_raw.get("onecycle_max_lr", None),
+            onecycle_pct_start=float(training_raw.get("onecycle_pct_start", 0.3)),
+            onecycle_div_factor=float(training_raw.get("onecycle_div_factor", 25.0)),
+            onecycle_final_div_factor=float(training_raw.get("onecycle_final_div_factor", 1e4)),
+            warm_restarts_t_0=int(training_raw.get("warm_restarts_t_0", 10)),
+            warm_restarts_t_mult=int(training_raw.get("warm_restarts_t_mult", 1)),
+            warm_restarts_eta_min=float(training_raw.get("warm_restarts_eta_min", 0.0)),
         )
+
 
         image_raw = data["image"]
         image = ImageConfig(

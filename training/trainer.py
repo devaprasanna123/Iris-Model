@@ -31,6 +31,7 @@ The Trainer supports:
 from __future__ import annotations
 
 import random
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
@@ -47,9 +48,22 @@ except Exception:  # pragma: no cover
     SummaryWriter = None  # type: ignore
 
 from training.metrics import MetricsSpec, dice_score, iou_score, pixel_accuracy, precision_score, recall_score, f1_score
-from training.losses import CombinedLoss
 from training.utils.checkpoint import CheckpointManager
+
 from training.utils.logger import Logger
+
+
+def _safe_getattr(obj: object, name: str, default: object) -> object:
+    try:
+        return getattr(obj, name)
+    except Exception:
+        return default
+
+
+
+# NOTE: This Trainer implementation is upgraded incrementally.
+# It must preserve the training contracts used by existing train.py.
+
 
 
 @dataclass
@@ -94,6 +108,12 @@ class EarlyStopping:
 class Trainer:
     """Training harness for MedicalAI.
 
+    Notes:
+      - Backward compatible: default behavior matches previous Trainer semantics.
+      - v2 upgrades supported via extra optional constructor kwargs are handled
+        inside the Trainer methods when present on `self`.
+
+
     Args:
         model: U-Net model returning logits of shape (B, C, H, W).
         train_loader: DataLoader yielding (image, mask).
@@ -133,6 +153,8 @@ class Trainer:
         early_stopping_patience: int = 7,
         resume: bool = True,
         resume_which: str = "last",
+        training_config: Optional[dict] = None,
+        monitor: Optional[object] = None,
     ) -> None:
         self.model = model
         self.train_loader = train_loader
@@ -162,7 +184,31 @@ class Trainer:
         self.best_epoch = 0
 
         if resume:
+            self.training_config = training_config or {}
             self._try_resume(resume_which=resume_which)
+        else:
+            self.training_config = training_config or {}
+
+        # Monitoring (optional)
+        self.monitor = monitor
+        if self.monitor is not None:
+            try:
+                self.monitor.set_writer(self.writer)
+            except Exception:
+                pass
+            try:
+                # provide context for richer reports (optional)
+                self.monitor.set_training_context(
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    scheduler=self.scheduler,
+                    loss_fn=self.loss_fn,
+                    train_loader=self.train_loader,
+                    val_loader=self.val_loader,
+                    training_config=self.training_config,
+                )
+            except Exception:
+                pass
 
         # Deterministic-ish
         random.seed(0)
@@ -180,6 +226,7 @@ class Trainer:
                 model=self.model,
                 optimizer=self.optimizer,
                 scheduler=self.scheduler,
+                scaler=self.scaler,
                 which=resume_which,
                 strict=True,
             )
@@ -197,6 +244,7 @@ class Trainer:
             )
         except Exception as e:  # pragma: no cover
             self.logger.warning("Resume failed (%s). Starting fresh. Error: %s", resume_which, e)
+        # end _try_resume
 
     def _current_lr(self) -> float:
         """Return current learning rate from first param group."""
@@ -228,8 +276,14 @@ class Trainer:
             "f1": f1,
         }
 
-    def _epoch_loop(self, *, train: bool, epoch: int) -> Dict[str, Any]:
+    def _epoch_loop(
+        self,
+        *,
+        train: bool,
+        epoch: int,
+    ) -> Dict[str, Any]:
         """Run one epoch for training or validation."""
+
 
         if train:
             self.model.train()
@@ -237,11 +291,11 @@ class Trainer:
             desc = f"Epoch {epoch} [train]"
         else:
             self.model.eval()
-            loader = self.val_loader
-            desc = f"Epoch {epoch} [val]"
 
         total_loss = 0.0
         num_batches = 0
+        grad_norm_sum = 0.0
+        grad_norm_count = 0
 
         # Accumulate metrics across batches by summation then divide.
         dice_sum = 0.0
@@ -268,8 +322,70 @@ class Trainer:
 
             if train:
                 self.scaler.scale(loss).backward()
+
+                # Grad clipping (supports AMP unscale)
+                try:
+                    tc = self.training_config
+                    if isinstance(tc, dict):
+                        t_cfg = tc.get("training", {})
+                        grad_clip_enabled = bool(t_cfg.get("grad_clip_enabled", False))
+                        grad_clip_max_norm = float(t_cfg.get("grad_clip_max_norm", 1.0))
+                    else:
+                        grad_clip_enabled = bool(getattr(getattr(tc, "training", tc), "grad_clip_enabled", False))
+                        grad_clip_max_norm = float(getattr(getattr(tc, "training", tc), "grad_clip_max_norm", 1.0))
+                except Exception:
+                    grad_clip_enabled = False
+                    grad_clip_max_norm = 1.0
+
+                if self.mixed_precision and self.device.type == "cuda":
+                    try:
+                        self.scaler.unscale_(self.optimizer)
+                    except Exception:
+                        pass
+
+                # Compute or clip gradient norm
+                try:
+                    if grad_clip_enabled:
+                        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip_max_norm)
+                    else:
+                        # compute L2 norm of gradients
+                        total_norm = 0.0
+                        for p in self.model.parameters():
+                            if p.grad is not None:
+                                param_norm = p.grad.detach().data.norm(2)
+                                total_norm += float(param_norm.item()) ** 2
+                        grad_norm = float(total_norm ** 0.5)
+                except Exception:
+                    grad_norm = 0.0
+
+                # Step optimizer via scaler
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+
+                # Per-batch scheduler stepping (OneCycleLR expects per-batch step)
+                if self.scheduler is not None:
+                    try:
+                        from torch.optim.lr_scheduler import OneCycleLR
+
+                        if isinstance(self.scheduler, OneCycleLR) or self.scheduler.__class__.__name__ == "OneCycleLR":
+                            try:
+                                self.scheduler.step()
+                            except Exception:
+                                pass
+                    except Exception:
+                        # Best-effort: fallback by name
+                        try:
+                            if self.scheduler.__class__.__name__ == "OneCycleLR":
+                                self.scheduler.step()
+                        except Exception:
+                            pass
+
+                # accumulate grad norm for logging
+                try:
+                    grad_norm_sum += float(grad_norm)
+                    grad_norm_count += 1
+                except Exception:
+                    pass
 
             with torch.no_grad():
                 metrics = self._compute_metrics_from_logits(logits, masks)
@@ -290,6 +406,7 @@ class Trainer:
         avg_prec = prec_mean_sum / max(1, num_batches)
         avg_rec = rec_mean_sum / max(1, num_batches)
         avg_f1 = f1_mean_sum / max(1, num_batches)
+        avg_grad_norm = (grad_norm_sum / grad_norm_count) if grad_norm_count > 0 else 0.0
 
         return {
             "loss": avg_loss,
@@ -299,6 +416,7 @@ class Trainer:
             "precision_mean": avg_prec,
             "recall_mean": avg_rec,
             "f1_mean": avg_f1,
+            "grad_norm": avg_grad_norm,
         }
 
     def _maybe_step_scheduler(self) -> None:
@@ -318,7 +436,6 @@ class Trainer:
 
     def fit(self) -> TrainResult:
         """Run training until completion or early stopping."""
-
         self.model.to(self.device)
 
         # If AMP disabled on CPU, disable scaler.
@@ -327,30 +444,43 @@ class Trainer:
 
         num_epochs = int(getattr(self, "num_epochs", 0))
 
-        # We infer epochs from train_loader length is not reliable.
-        # num_epochs should be set externally via trainer.fit(epochs=...).
-        # For simplicity, we read from optimizer/scheduler config not possible.
-        # So: set by caller using attribute.
+        # Start monitoring
+        if self.monitor is not None:
+            try:
+                self.monitor.on_train_start(num_epochs)
+            except Exception:
+                pass
+
+        # record wall-clock training start
+        try:
+            self._train_start_time = time.perf_counter()
+        except Exception:
+            self._train_start_time = None
+
         if num_epochs <= 0:
-            # Determine epochs by best guess: keep loop controlled by attribute.
             raise RuntimeError("Trainer.fit() requires self.num_epochs to be set before calling.")
 
         start_epoch = int(self.start_epoch)
-        stop_best_dice = float(self.best_dice)
 
         for epoch in range(start_epoch, num_epochs + 1):
+            if self.monitor is not None:
+                try:
+                    self.monitor.on_epoch_start(epoch)
+                except Exception:
+                    pass
+
             train_stats = self._epoch_loop(train=True, epoch=epoch)
             val_stats = self._epoch_loop(train=False, epoch=epoch)
 
             lr = self._current_lr()
 
-            train_loss = float(train_stats["loss"])
-            val_loss = float(val_stats["loss"])
-            dice_mean = float(val_stats["dice_mean"])
-            iou_mean = float(val_stats["iou_mean"])
-            pix_acc = float(val_stats["pixel_accuracy"])
+            train_loss = float(train_stats.get("loss", 0.0))
+            val_loss = float(val_stats.get("loss", 0.0))
+            dice_mean = float(val_stats.get("dice_mean", 0.0))
+            iou_mean = float(val_stats.get("iou_mean", 0.0))
+            pix_acc = float(val_stats.get("pixel_accuracy", 0.0))
 
-            # Required every epoch print
+            # Console + logger
             print(
                 f"Epoch {epoch} | "
                 f"Train Loss: {train_loss:.6f} | Validation Loss: {val_loss:.6f} | "
@@ -370,6 +500,7 @@ class Trainer:
                 lr,
             )
 
+            # TensorBoard scalars
             if self.writer is not None:
                 self.writer.add_scalar("Loss/train", train_loss, epoch)
                 self.writer.add_scalar("Loss/val", val_loss, epoch)
@@ -377,61 +508,126 @@ class Trainer:
                 self.writer.add_scalar("IoU/val_mean", iou_mean, epoch)
                 self.writer.add_scalar("PixelAccuracy/val", pix_acc, epoch)
                 self.writer.add_scalar("LR", lr, epoch)
-
-                # Precision/Recall/F1
-                self.writer.add_scalar("Precision/val_mean", float(val_stats["precision_mean"]), epoch)
-                self.writer.add_scalar("Recall/val_mean", float(val_stats["recall_mean"]), epoch)
-                self.writer.add_scalar("F1/val_mean", float(val_stats["f1_mean"]), epoch)
+                try:
+                    self.writer.add_scalar("Precision/val_mean", float(val_stats.get("precision_mean", 0.0)), epoch)
+                    self.writer.add_scalar("Recall/val_mean", float(val_stats.get("recall_mean", 0.0)), epoch)
+                    self.writer.add_scalar("F1/val_mean", float(val_stats.get("f1_mean", 0.0)), epoch)
+                except Exception:
+                    pass
 
             # Save last every epoch
+            # compute training duration to store in checkpoint metadata
+            try:
+                training_duration = None if self._train_start_time is None else (time.perf_counter() - self._train_start_time)
+            except Exception:
+                training_duration = None
+
             self.checkpoint_manager.save_last(
                 model=self.model,
                 optimizer=self.optimizer,
                 scheduler=self.scheduler,
+                scaler=self.scaler,
                 epoch=epoch,
                 train_loss=train_loss,
                 val_loss=val_loss,
                 dice=dice_mean,
                 best_dice=self.best_dice,
-                training_config={},
+                training_config=self.training_config,
                 extra={
                     "lr": lr,
                     "iou_mean": iou_mean,
                     "pixel_accuracy": pix_acc,
-                    "precision_mean": float(val_stats["precision_mean"]),
-                    "recall_mean": float(val_stats["recall_mean"]),
-                    "f1_mean": float(val_stats["f1_mean"]),
+                    "grad_norm": float(train_stats.get("grad_norm", 0.0)),
+                    "precision_mean": float(val_stats.get("precision_mean", 0.0)),
+                    "recall_mean": float(val_stats.get("recall_mean", 0.0)),
+                    "f1_mean": float(val_stats.get("f1_mean", 0.0)),
+                    "training_duration_s": training_duration,
+                    "metrics": {
+                        "dice": dice_mean,
+                        "iou": iou_mean,
+                        "precision": float(val_stats.get("precision_mean", 0.0)),
+                        "recall": float(val_stats.get("recall_mean", 0.0)),
+                        "f1": float(val_stats.get("f1_mean", 0.0)),
+                    },
                 },
             )
 
+            # Save best if improved
             improved = dice_mean > self.best_dice
             if improved:
                 self.best_dice = dice_mean
                 self.best_epoch = epoch
-                stop_best_dice = float(self.best_dice)
-
                 self.checkpoint_manager.save_best(
                     model=self.model,
                     optimizer=self.optimizer,
                     scheduler=self.scheduler,
+                    scaler=self.scaler,
                     epoch=epoch,
                     train_loss=train_loss,
                     val_loss=val_loss,
                     dice=dice_mean,
                     best_dice=self.best_dice,
-                    training_config={},
+                    training_config=self.training_config,
                     extra={
                         "lr": lr,
                         "iou_mean": iou_mean,
                         "pixel_accuracy": pix_acc,
-                        "precision_mean": float(val_stats["precision_mean"]),
-                        "recall_mean": float(val_stats["recall_mean"]),
-                        "f1_mean": float(val_stats["f1_mean"]),
+                        "grad_norm": float(train_stats.get("grad_norm", 0.0)),
+                        "precision_mean": float(val_stats.get("precision_mean", 0.0)),
+                        "recall_mean": float(val_stats.get("recall_mean", 0.0)),
+                        "f1_mean": float(val_stats.get("f1_mean", 0.0)),
+                        "training_duration_s": training_duration,
+                        "metrics": {
+                            "dice": dice_mean,
+                            "iou": iou_mean,
+                            "precision": float(val_stats.get("precision_mean", 0.0)),
+                            "recall": float(val_stats.get("recall_mean", 0.0)),
+                            "f1": float(val_stats.get("f1_mean", 0.0)),
+                        },
                     },
                 )
 
-            # Scheduler step
-            self._maybe_step_scheduler()
+            # Scheduler step (handle ReduceLROnPlateau specially)
+            if self.scheduler is not None:
+                try:
+                    from torch.optim.lr_scheduler import ReduceLROnPlateau
+
+                    if isinstance(self.scheduler, ReduceLROnPlateau) or self.scheduler.__class__.__name__ == "ReduceLROnPlateau":
+                        metric_name = "val_dice_mean"
+                        tc = self.training_config
+                        try:
+                            if isinstance(tc, dict):
+                                metric_name = tc.get("training", {}).get("lr_plateau_metric", metric_name)
+                            else:
+                                metric_name = getattr(getattr(tc, "training", tc), "lr_plateau_metric", metric_name)
+                        except Exception:
+                            metric_name = metric_name
+
+                        key = metric_name
+                        if isinstance(key, str) and key.startswith("val_"):
+                            key = key[len("val_"):]
+
+                        metric_value = val_stats.get(key, None)
+                        if metric_value is None:
+                            metric_value = float(dice_mean)
+
+                        try:
+                            self.scheduler.step(metric_value)
+                        except Exception:
+                            try:
+                                self.scheduler.step()
+                            except Exception:
+                                pass
+                    else:
+                        try:
+                            self.scheduler.step()
+                        except Exception:
+                            pass
+                except Exception:
+                    try:
+                        self.scheduler.step()
+                    except Exception:
+                        pass
 
             # Early stopping
             if self.early_stopping_enabled:
@@ -440,9 +636,33 @@ class Trainer:
                     self.logger.info("Early stopping triggered at epoch %s.", epoch)
                     break
 
+            # Monitor epoch end
+            try:
+                if self.monitor is not None:
+                    self.monitor.on_epoch_end(
+                        epoch=epoch,
+                        total_epochs=num_epochs,
+                        train_stats=train_stats,
+                        val_stats=val_stats,
+                        lr=lr,
+                        grad_norm=float(train_stats.get("grad_norm", 0.0)),
+                        device=self.device,
+                    )
+            except Exception:
+                pass
+
         if self.writer is not None:
-            self.writer.flush()
-            self.writer.close()
+            try:
+                self.writer.flush()
+                self.writer.close()
+            except Exception:
+                pass
+
+        if self.monitor is not None:
+            try:
+                self.monitor.on_train_end()
+            except Exception:
+                pass
 
         last_epoch = epoch
         return TrainResult(best_dice=self.best_dice, best_epoch=self.best_epoch, last_epoch=last_epoch)
@@ -483,7 +703,19 @@ if __name__ == "__main__":
     model = TinyModel().to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
-    loss_fn = CombinedLoss(dice_weight=1.0)
+    try:
+        from training.loss_factory import create_loss
+
+        # Build a minimal cfg-like object for the self-test
+        class _MiniCfg:
+            class training:
+                loss_name = "dice_cross_entropy"
+                dice_weight = 1.0
+
+        loss_fn = create_loss(_MiniCfg())
+    except Exception:
+        from training.losses import CombinedLoss
+        loss_fn = CombinedLoss(dice_weight=1.0)
     metrics_spec = MetricsSpec(num_classes=3)
 
     logger = Logger(name="MedicalAI.trainer_self_test", log_dir=Path("MedicalAI") / "training" / "logs" / "_self_test")

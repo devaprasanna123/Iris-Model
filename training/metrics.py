@@ -137,6 +137,108 @@ def _overall_pixel_accuracy(pred_labels: torch.Tensor, target: torch.Tensor) -> 
     return correct / (total + 1e-7)
 
 
+def confusion_matrix(
+    pred_logits_or_labels: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    spec: MetricsSpec = _DEFAULT_SPEC,
+    input_is_logits: Optional[bool] = None,
+) -> torch.Tensor:
+    """Compute the confusion matrix for multiclass segmentation.
+
+    Returns a matrix of shape (C, C) where rows are ground truth classes and
+    columns are predicted classes.
+    """
+
+    if input_is_logits is None:
+        input_is_logits = pred_logits_or_labels.ndim == 4
+
+    if input_is_logits:
+        pred_labels = _to_pred_labels(pred_logits_or_labels)
+    else:
+        pred_labels = pred_logits_or_labels
+
+    target_b = _ensure_target_batch(target)
+    if pred_labels.ndim == 2:
+        pred_labels = pred_labels.unsqueeze(0)
+
+    if pred_labels.shape != target_b.shape:
+        raise ValueError(
+            f"Shape mismatch after batching: pred_labels={tuple(pred_labels.shape)} target={tuple(target_b.shape)}"
+        )
+
+    num_classes = spec.num_classes
+    pred_flat = pred_labels.reshape(-1)
+    target_flat = target_b.reshape(-1)
+
+    one_hot_pred = F.one_hot(pred_flat, num_classes=num_classes).to(dtype=torch.float64)
+    one_hot_target = F.one_hot(target_flat, num_classes=num_classes).to(dtype=torch.float64)
+
+    return one_hot_target.T @ one_hot_pred
+
+
+def _extract_boundary(mask: torch.Tensor) -> torch.Tensor:
+    """Extract a binary boundary map from a class mask tensor."""
+
+    if mask.ndim != 3:
+        raise ValueError(f"mask must have shape (B,H,W); got {tuple(mask.shape)}")
+
+    # Use morphological erosion on the binary mask to extract boundary pixels.
+    mask_float = mask.to(dtype=torch.float32).unsqueeze(1)
+    eroded = 1.0 - F.max_pool2d(1.0 - mask_float, kernel_size=3, stride=1, padding=1)
+    boundary = (mask_float - eroded) > 0.5
+    return boundary.squeeze(1).to(dtype=torch.uint8)
+
+
+def boundary_iou(
+    pred_logits_or_labels: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    spec: MetricsSpec = _DEFAULT_SPEC,
+    input_is_logits: Optional[bool] = None,
+) -> Dict[str, float]:
+    """Compute boundary IoU per class + mean."""
+
+    if input_is_logits is None:
+        input_is_logits = pred_logits_or_labels.ndim == 4
+
+    if input_is_logits:
+        pred_labels = _to_pred_labels(pred_logits_or_labels)
+    else:
+        pred_labels = pred_logits_or_labels
+
+    target_b = _ensure_target_batch(target)
+    if pred_labels.ndim == 2:
+        pred_labels = pred_labels.unsqueeze(0)
+
+    if pred_labels.shape != target_b.shape:
+        raise ValueError(
+            f"Shape mismatch after batching: pred_labels={tuple(pred_labels.shape)} target={tuple(target_b.shape)}"
+        )
+
+    output: Dict[str, float] = {}
+    scores = []
+    for i, class_name in enumerate(spec.class_names):
+        pred_mask = (pred_labels == i).to(dtype=torch.uint8)
+        target_mask = (target_b == i).to(dtype=torch.uint8)
+
+        pred_boundary = _extract_boundary(pred_mask)
+        target_boundary = _extract_boundary(target_mask)
+
+        intersection = (pred_boundary & target_boundary).sum().to(dtype=torch.float32)
+        union = (pred_boundary | target_boundary).sum().to(dtype=torch.float32)
+        if union.item() == 0:
+            score = 1.0
+        else:
+            score = float(intersection / (union + spec.eps))
+
+        output[class_name] = float(score)
+        scores.append(score)
+
+    output["mean"] = float(sum(scores) / len(scores)) if scores else 0.0
+    return output
+
+
 def dice_score(
     pred_logits_or_labels: torch.Tensor,
     target: torch.Tensor,
