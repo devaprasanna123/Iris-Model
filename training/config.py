@@ -118,9 +118,9 @@ class DatasetConfig:
 
 @dataclass(frozen=True)
 class CheckpointConfig:
-    checkpoint_dir: Path = Path("MedicalAI") / "checkpoints_v2"
-    best_model_name: str = "best_model.pt"
-    last_model_name: str = "last_model.pt"
+    checkpoint_dir: Path = Path("/content/drive/MyDrive/MedicalAI/checkpoints_v2")
+    best_model_name: str = "best_model_v2.pt"
+    last_model_name: str = "last_model_v2.pt"
 
 
 @dataclass(frozen=True)
