@@ -84,6 +84,8 @@ def main() -> None:
 
     logger.info("Evaluation report saved to %s", output_root)
     logger.info("Overall metrics: %s", report.get("overall", {}))
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     logger.close()
 
 

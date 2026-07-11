@@ -22,6 +22,9 @@ from typing import Any, Dict, Literal, Tuple
 
 import torch
 
+MEDICALAI_VERSION = "2.0"
+TRAINING_VERSION = "v2"
+
 
 OptimizerName = Literal["adam", "sgd", "adamw"]
 
@@ -115,20 +118,21 @@ class DatasetConfig:
 
 @dataclass(frozen=True)
 class CheckpointConfig:
-    checkpoint_dir = Path("/content/drive/MyDrive/MedicalAI/checkpoints")
+    checkpoint_dir: Path = Path("MedicalAI") / "checkpoints_v2"
     best_model_name: str = "best_model.pt"
     last_model_name: str = "last_model.pt"
 
 
 @dataclass(frozen=True)
 class LogsConfig:
-    log_dir: Path = Path("MedicalAI") / "training" / "logs"
-    tensorboard_dir: Path = Path("MedicalAI") / "training" / "tensorboard"
+    log_dir: Path = Path("MedicalAI") / "logs_v2"
+    tensorboard_dir: Path = Path("MedicalAI") / "tensorboard_v2"
+    report_dir: Path = Path("MedicalAI") / "reports_v2"
 
 
 @dataclass(frozen=True)
 class OutputConfig:
-    prediction_dir: Path = Path("MedicalAI") / "training" / "predictions"
+    prediction_dir: Path = Path("MedicalAI") / "predictions_v2"
 
 
 @dataclass
@@ -217,15 +221,15 @@ class DatasetAugmentationConfig:
 
 @dataclass
 class TrainingHyperparams:
-    batch_size: int = 4
-    learning_rate: float = 1e-3
-    epochs: int = 30
+    batch_size: int = 2
+    learning_rate: float = 3e-4
+    epochs: int = 100
 
     optimizer: OptimizerName = "adamw"
     weight_decay: float = 1e-4
 
     # Scheduler name (v2). Legacy values ("cosine"/"step"/"none") still work.
-    scheduler: SchedulerName = "cosine"
+    scheduler: SchedulerName = "CosineAnnealingLR"
 
     # -------- Loss (v2) --------
     # Defaults match current behavior: CE + dice(weight=1.0)
@@ -280,7 +284,7 @@ class TrainingHyperparams:
     warm_restarts_eta_min: float = 0.0
 
     early_stopping: bool = True
-    patience: int = 7
+    patience: int = 15
 
     mixed_precision: bool = True
     seed: int = 42
@@ -306,7 +310,7 @@ class ModelConfig:
     architecture: str = "unetplusplus"
 
     # segmentation_models_pytorch encoder config
-    encoder_name: str = "efficientnet-b4"
+    encoder_name: str = "efficientnet-b3"
     encoder_weights: str = "imagenet"
 
     # task output contract
@@ -364,11 +368,49 @@ class TrainingConfig:
                 return str(x)
             return convert(x)
 
-        return walk(raw)
+        jsonable = walk(raw)
+        jsonable["training_version"] = TRAINING_VERSION
+        jsonable["medicalai_version"] = MEDICALAI_VERSION
+        return jsonable
 
     def print_config(self) -> None:
         data = self._as_jsonable()
         print(json.dumps(data, indent=2, sort_keys=True))
+
+    def validate(self) -> list[str]:
+        messages: list[str] = []
+
+        if not isinstance(self.dataset.dataset_root, Path):
+            messages.append("dataset.dataset_root must be a valid path.")
+
+        if self.training.batch_size <= 0:
+            messages.append("training.batch_size must be greater than 0.")
+
+        if self.training.epochs <= 0:
+            messages.append("training.epochs must be greater than 0.")
+
+        if self.training.learning_rate <= 0.0:
+            messages.append("training.learning_rate must be greater than 0.")
+
+        if self.training.weight_decay < 0.0:
+            messages.append("training.weight_decay must be non-negative.")
+
+        if self.training.patience < 0:
+            messages.append("training.patience must be non-negative.")
+
+        if self.training.grad_clip_enabled and self.training.grad_clip_max_norm <= 0.0:
+            messages.append("training.grad_clip_max_norm must be greater than 0 when grad_clip_enabled is enabled.")
+
+        if self.model.encoder_name.strip() == "":
+            messages.append("model.encoder_name must be set to a valid encoder name.")
+
+        if self.model.classes <= 0:
+            messages.append("model.classes must be greater than 0.")
+
+        if self.image.channels <= 0:
+            messages.append("image.channels must be greater than 0.")
+
+        return messages
 
     def save_json(self, path: str | Path = "config.json") -> Path:
         out_path = Path(path)
@@ -400,6 +442,7 @@ class TrainingConfig:
         logs = LogsConfig(
             tensorboard_dir=Path(data["logs"]["tensorboard_dir"]),
             log_dir=Path(data["logs"]["log_dir"]),
+            report_dir=Path(data["logs"].get("report_dir", Path("MedicalAI") / "reports_v2")),
         )
 
         output = OutputConfig(prediction_dir=Path(data["output"]["prediction_dir"]))

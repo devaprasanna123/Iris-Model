@@ -38,7 +38,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -229,6 +229,7 @@ class Trainer:
                 scaler=self.scaler,
                 which=resume_which,
                 strict=True,
+                expected_training_config=self.training_config,
             )
 
             # metadata.epoch is the epoch that produced the checkpoint.

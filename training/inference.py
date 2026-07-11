@@ -467,6 +467,8 @@ def infer_batch(
         summary_json_path.parent.mkdir(parents=True, exist_ok=True)
         summary_json_path.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
 
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     return results
 
 

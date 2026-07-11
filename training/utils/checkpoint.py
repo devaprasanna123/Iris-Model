@@ -25,6 +25,10 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 
 
+class IncompatibleCheckpointError(Exception):
+    """Raised when a checkpoint cannot be loaded into the current model/config."""
+
+
 @dataclass(frozen=True)
 class CheckpointMetadata:
     """Metadata stored alongside state_dicts inside a checkpoint."""
@@ -35,6 +39,11 @@ class CheckpointMetadata:
     dice: float
     best_dice: float
     training_config: Dict[str, Any]
+    model_architecture: str
+    encoder_name: str
+    classes: int
+    training_version: str
+    medicalai_version: str
     timestamp: str
     git_commit: Optional[str] = None
     training_duration_s: Optional[float] = None
@@ -48,6 +57,11 @@ class CheckpointMetadata:
             "dice": float(self.dice),
             "best_dice": float(self.best_dice),
             "training_config": self.training_config,
+            "model_architecture": self.model_architecture,
+            "encoder_name": self.encoder_name,
+            "classes": int(self.classes),
+            "training_version": self.training_version,
+            "medicalai_version": self.medicalai_version,
             "timestamp": self.timestamp,
             "git_commit": self.git_commit,
             "training_duration_s": self.training_duration_s,
@@ -153,6 +167,50 @@ class CheckpointManager:
 
         return payload
 
+    def _build_checkpoint_metadata(
+        self,
+        *,
+        epoch: int,
+        train_loss: float,
+        val_loss: float,
+        dice: float,
+        best_dice: float,
+        training_config: Dict[str, Any],
+        timestamp: str,
+        git_commit: Optional[str],
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> CheckpointMetadata:
+        model_architecture = ""
+        encoder_name = ""
+        classes = 0
+        training_version = ""
+        medicalai_version = ""
+        if isinstance(training_config, dict):
+            model_cfg = training_config.get("model", {})
+            model_architecture = str(model_cfg.get("architecture", ""))
+            encoder_name = str(model_cfg.get("encoder_name", ""))
+            classes = int(model_cfg.get("classes", 0) or 0)
+            training_version = str(training_config.get("training_version", ""))
+            medicalai_version = str(training_config.get("medicalai_version", ""))
+
+        return CheckpointMetadata(
+            epoch=epoch,
+            train_loss=train_loss,
+            val_loss=val_loss,
+            dice=dice,
+            best_dice=best_dice,
+            training_config=training_config,
+            model_architecture=model_architecture,
+            encoder_name=encoder_name,
+            classes=classes,
+            training_version=training_version,
+            medicalai_version=medicalai_version,
+            timestamp=timestamp,
+            git_commit=git_commit,
+            training_duration_s=extra.get("training_duration_s") if isinstance(extra, dict) and "training_duration_s" in extra else None,
+            metrics=extra.get("metrics") if isinstance(extra, dict) and "metrics" in extra else None,
+        )
+
     def _get_git_commit(self) -> Optional[str]:
         try:
             # Attempt to get short commit hash
@@ -241,7 +299,7 @@ class CheckpointManager:
 
         ts = timestamp or datetime.now().isoformat()
         git_commit = self._get_git_commit()
-        metadata = CheckpointMetadata(
+        metadata = self._build_checkpoint_metadata(
             epoch=epoch,
             train_loss=train_loss,
             val_loss=val_loss,
@@ -250,8 +308,7 @@ class CheckpointManager:
             training_config=training_config,
             timestamp=ts,
             git_commit=git_commit,
-            training_duration_s=extra.get("training_duration_s") if isinstance(extra, dict) and "training_duration_s" in extra else None,
-            metrics=extra.get("metrics") if isinstance(extra, dict) and "metrics" in extra else None,
+            extra=extra,
         )
 
         payload = self._build_payload(
@@ -310,7 +367,7 @@ class CheckpointManager:
 
         ts = timestamp or datetime.now().isoformat()
         git_commit = self._get_git_commit()
-        metadata = CheckpointMetadata(
+        metadata = self._build_checkpoint_metadata(
             epoch=epoch,
             train_loss=train_loss,
             val_loss=val_loss,
@@ -319,8 +376,7 @@ class CheckpointManager:
             training_config=training_config,
             timestamp=ts,
             git_commit=git_commit,
-            training_duration_s=extra.get("training_duration_s") if isinstance(extra, dict) and "training_duration_s" in extra else None,
-            metrics=extra.get("metrics") if isinstance(extra, dict) and "metrics" in extra else None,
+            extra=extra,
         )
 
         payload = self._build_payload(
@@ -367,6 +423,7 @@ class CheckpointManager:
         scaler: Optional[Any] = None,
         which: str = "last",
         strict: bool = True,
+        expected_training_config: Optional[Dict[str, Any]] = None,
     ) -> Tuple[CheckpointMetadata, Dict[str, Any]]:
         """Load checkpoint and restore model/optimizer/scheduler.
 
@@ -387,6 +444,43 @@ class CheckpointManager:
 
         map_location = self._map_location
         checkpoint = torch.load(path, map_location=map_location)
+
+        checkpoint_version = int(checkpoint.get("checkpoint_version", 1))
+        if checkpoint_version != 2:
+            raise IncompatibleCheckpointError(
+                "Incompatible checkpoint detected. Starting fresh training."
+            )
+
+        md_raw = checkpoint.get("metadata")
+        if not isinstance(md_raw, dict):
+            raise IncompatibleCheckpointError(
+                "Incompatible checkpoint metadata detected. Starting fresh training."
+            )
+
+        if expected_training_config is not None and isinstance(expected_training_config, dict):
+            expected_model_cfg = expected_training_config.get("model", {})
+            expected_arch = str(expected_model_cfg.get("architecture", "")).lower().strip()
+            expected_encoder = str(expected_model_cfg.get("encoder_name", "")).lower().strip()
+            expected_classes = int(expected_model_cfg.get("classes", 0) or 0)
+
+            checkpoint_arch = str(md_raw.get("model_architecture", "")).lower().strip()
+            checkpoint_encoder = str(md_raw.get("encoder_name", "")).lower().strip()
+            checkpoint_classes = int(md_raw.get("classes", 0) or 0)
+
+            if expected_arch and checkpoint_arch and expected_arch != checkpoint_arch:
+                raise IncompatibleCheckpointError(
+                    "Incompatible checkpoint detected. Starting fresh training."
+                )
+
+            if expected_encoder and checkpoint_encoder and expected_encoder != checkpoint_encoder:
+                raise IncompatibleCheckpointError(
+                    "Incompatible checkpoint detected. Starting fresh training."
+                )
+
+            if expected_classes and checkpoint_classes and expected_classes != checkpoint_classes:
+                raise IncompatibleCheckpointError(
+                    "Incompatible checkpoint detected. Starting fresh training."
+                )
 
         model.load_state_dict(checkpoint["model_state_dict"], strict=strict)
 
@@ -414,6 +508,11 @@ class CheckpointManager:
             dice=float(md_raw.get("dice", 0.0)),
             best_dice=float(md_raw.get("best_dice", 0.0)),
             training_config=dict(md_raw.get("training_config", {})),
+            model_architecture=str(md_raw.get("model_architecture", "")),
+            encoder_name=str(md_raw.get("encoder_name", "")),
+            classes=int(md_raw.get("classes", 0)),
+            training_version=str(md_raw.get("training_version", "")),
+            medicalai_version=str(md_raw.get("medicalai_version", "")),
             timestamp=str(md_raw.get("timestamp", "")),
             git_commit=md_raw.get("git_commit"),
             training_duration_s=md_raw.get("training_duration_s"),

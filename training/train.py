@@ -149,6 +149,13 @@ def _create_scheduler(cfg: TrainingConfig, optimizer: torch.optim.Optimizer) -> 
 def main() -> None:
     cfg = TrainingConfig()
 
+    validation_errors = cfg.validate()
+    if validation_errors:
+        print("CONFIG VALIDATION FAILED:")
+        for err in validation_errors:
+            print(f"- {err}")
+        raise ValueError("Training configuration validation failed. Fix config values and retry.")
+
     # Auto-detect CUDA and print GPU name (config already auto-detects, but we also print here).
     device = torch.device(cfg.device.device)
     cuda_available = bool(torch.cuda.is_available())
@@ -171,26 +178,7 @@ def main() -> None:
     # Dataloaders
     dataset_root = Path(cfg.dataset.dataset_root)
 
-    train_loader = create_train_loader(
-        dataset_path=dataset_root,
-        batch_size=int(cfg.training.batch_size),
-        num_workers=int(cfg.training.workers),
-        shuffle=True,
-    )
-    val_loader = create_val_loader(
-        dataset_path=dataset_root,
-        batch_size=int(cfg.training.batch_size),
-        num_workers=int(cfg.training.workers),
-        shuffle=False,
-    )
-    test_loader = create_test_loader(
-        dataset_path=dataset_root,
-        batch_size=int(cfg.training.batch_size),
-        num_workers=int(cfg.training.workers),
-        shuffle=False,
-    )
-
-    # Verify required dataset paths exist
+    # Verify required dataset paths exist before constructing loaders.
     train_images_path = dataset_root / cfg.dataset.train_folder / "images"
     train_masks_path = dataset_root / cfg.dataset.train_folder / "masks"
     val_images_path = dataset_root / cfg.dataset.val_folder / "images"
@@ -227,7 +215,70 @@ def main() -> None:
             )
         )
 
+    print("===== Dataset validation: OK =====")
+
+    train_loader = create_train_loader(
+        dataset_path=dataset_root,
+        batch_size=int(cfg.training.batch_size),
+        num_workers=int(cfg.training.workers),
+        shuffle=True,
+        cfg=cfg,
+    )
+    val_loader = create_val_loader(
+        dataset_path=dataset_root,
+        batch_size=int(cfg.training.batch_size),
+        num_workers=int(cfg.training.workers),
+        shuffle=False,
+        cfg=cfg,
+    )
+    test_loader = create_test_loader(
+        dataset_path=dataset_root,
+        batch_size=int(cfg.training.batch_size),
+        num_workers=int(cfg.training.workers),
+        shuffle=False,
+        cfg=cfg,
+    )
+    train_masks_path = dataset_root / cfg.dataset.train_folder / "masks"
+    val_images_path = dataset_root / cfg.dataset.val_folder / "images"
+    val_masks_path = dataset_root / cfg.dataset.val_folder / "masks"
+    test_images_path = dataset_root / cfg.dataset.test_folder / "images"
+    test_masks_path = dataset_root / cfg.dataset.test_folder / "masks"
+
+    print("===== Dataset Root / Paths =====")
+    print(f"Dataset Root: {dataset_root}")
+    print(f"Train Images Path: {train_images_path}")
+    print(f"Train Masks Path: {train_masks_path}")
+    print(f"Validation Images Path: {val_images_path}")
+    print(f"Validation Masks Path: {val_masks_path}")
+    print(f"Test Images Path: {test_images_path}")
+    print(f"Test Masks Path: {test_masks_path}")
+
+    required_paths = {
+        "Train Images Path": train_images_path,
+        "Train Masks Path": train_masks_path,
+        "Validation Images Path": val_images_path,
+        "Validation Masks Path": val_masks_path,
+        "Test Images Path": test_images_path,
+        "Test Masks Path": test_masks_path,
+    }
+
+    missing = [name for name, p in required_paths.items() if not Path(p).exists()]
+    for name in missing:
+        print(f"MISSING: {name} -> {required_paths[name]}")
+
+    if missing:
+        raise FileNotFoundError(
+            "One or more required dataset directories are missing:\n" + "\n".join(
+                f"- {name}: {required_paths[name]}" for name in missing
+            )
+        )
+
     print("===== DataLoader initialization: OK =====")
+    cfg.logs.log_dir.mkdir(parents=True, exist_ok=True)
+    cfg.logs.tensorboard_dir.mkdir(parents=True, exist_ok=True)
+    cfg.logs.report_dir.mkdir(parents=True, exist_ok=True)
+    cfg.output.prediction_dir.mkdir(parents=True, exist_ok=True)
+    cfg.checkpoint.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     # Print required training configuration block BEFORE training starts
     print("\n==================================")
@@ -239,7 +290,12 @@ def main() -> None:
     print(f"Epochs: {int(cfg.training.epochs)}")
     print(f"Learning Rate: {float(cfg.training.learning_rate)}")
     print(f"Optimizer: {str(cfg.training.optimizer).capitalize()}")
-    print(f"Scheduler: {str(cfg.training.scheduler).lower()}")
+    print(f"Scheduler: {str(cfg.training.scheduler)}")
+    print(f"Checkpoint Path: {cfg.checkpoint.checkpoint_dir}")
+    print(f"Log Path: {cfg.logs.log_dir}")
+    print(f"TensorBoard Path: {cfg.logs.tensorboard_dir}")
+    print(f"Report Path: {cfg.logs.report_dir}")
+    print(f"Prediction Path: {cfg.output.prediction_dir}")
 
     logger = Logger(
         name="MedicalAI.train",

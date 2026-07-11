@@ -178,6 +178,8 @@ def predict_one(
         out_dir=out_dir,
     )
 
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     return t1 - t0
 
 
