@@ -169,7 +169,7 @@ class Trainer:
         self.num_epochs = int(num_epochs)
 
         self.mixed_precision = bool(mixed_precision)
-        self.scaler = GradScaler(enabled=self.mixed_precision)
+        self.scaler = GradScaler(enabled=self.mixed_precision, device=self.device)
 
         self.early_stopping_enabled = bool(early_stopping)
         self.early_stopping = EarlyStopping(patience=early_stopping_patience)
@@ -316,7 +316,10 @@ class Trainer:
             if train:
                 self.optimizer.zero_grad(set_to_none=True)
 
-            with autocast(enabled=(self.mixed_precision and self.device.type == "cuda")):
+            with autocast(
+                device_type=self.device.type,
+                enabled=(self.mixed_precision and self.device.type == "cuda"),
+            ):
                 logits = self.model(imgs)
                 loss = self.loss_fn(logits, masks)
 
