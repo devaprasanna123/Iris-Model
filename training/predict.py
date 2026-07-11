@@ -129,7 +129,17 @@ overlay = _overlay(
     alpha=0.5,
 )
 
-    out_dir.mkdir(parents=True, exist_ok=True)
+out_dir.mkdir(parents=True, exist_ok=True)
+
+stem = image_path.stem
+
+pred_mask_path = out_dir / f"{stem}_pred_mask.png"
+overlay_path = out_dir / f"{stem}_overlay.png"
+colored_path = out_dir / f"{stem}_pred_mask_colored.png"
+
+cv2.imwrite(str(pred_mask_path), pred_mask)
+cv2.imwrite(str(colored_path), colored)
+cv2.imwrite(str(overlay_path), overlay) 
     stem = image_path.stem
 
     pred_mask_path = out_dir / f"{stem}_pred_mask.png"
