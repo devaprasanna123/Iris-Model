@@ -7,6 +7,10 @@ It provides:
 - TrainingConfig dataclass
 - JSON save/load helpers
 - A small self-test when run as a script
+
+Phase note:
+- Dataset pipeline parameters for preprocessing and augmentation live here
+  so the dataset loader does not hardcode values.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import json
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, Literal, Tuple
 
 import torch
 
@@ -24,15 +28,7 @@ SchedulerName = Literal["none", "step", "cosine"]
 
 
 def _detect_device() -> Dict[str, Any]:
-    """Auto-detect device and CUDA availability.
-
-    Returns:
-        Dict with keys:
-            - device_type: "cuda" or "cpu"
-            - cuda_available: bool
-            - gpu_name: str ("N/A" if CPU)
-            - device: torch.device string
-    """
+    """Auto-detect device and CUDA availability."""
 
     cuda_available = bool(torch.cuda.is_available())
     if cuda_available:
@@ -57,22 +53,13 @@ def _detect_device() -> Dict[str, Any]:
 
 
 def _default_workers() -> int:
-    """Choose DataLoader workers automatically.
-
-    Requirement note:
-    - Windows/Linux supported.
-    - We'll use CPU count minus 1, clamped to [0, 8].
-
-    Returns:
-        int: num_workers value.
-    """
+    """Choose DataLoader workers automatically."""
 
     try:
-        cpu_count = len(torch.multiprocessing.get_all_start_methods())  # not CPU count; fallback below
+        cpu_count = len(torch.multiprocessing.get_all_start_methods())
     except Exception:
         cpu_count = 0
 
-    # Better CPU count method in pure Python
     try:
         import os
 
@@ -80,7 +67,6 @@ def _default_workers() -> int:
     except Exception:
         cpu_count = cpu_count or 0
 
-    # If unknown, fall back to 2.
     if cpu_count <= 0:
         return 2
 
@@ -88,13 +74,7 @@ def _default_workers() -> int:
 
 
 def _default_dataset_root() -> Path:
-    """Pick the dataset root path dynamically.
-
-    Order:
-    1) /content/dataset (Colab)
-    2) /content/drive/MyDrive/MedicalAI_Dataset/dataset (Colab)
-    3) MedicalAI/dataset (repo fallback)
-    """
+    """Pick the dataset root path dynamically."""
 
     candidates = [
         Path("/content/dataset"),
@@ -117,8 +97,6 @@ class DatasetConfig:
     test_folder: str = "test"
 
 
-
-
 @dataclass(frozen=True)
 class CheckpointConfig:
     checkpoint_dir = Path("/content/drive/MyDrive/MedicalAI/checkpoints")
@@ -139,11 +117,10 @@ class OutputConfig:
 
 @dataclass
 class DeviceConfig:
-    # Automatically detected
     device_type: Literal["cuda", "cpu"] = "cpu"
     cuda_available: bool = False
     gpu_name: str = "N/A"
-    device: str = "cpu"  # torch.device string representation
+    device: str = "cpu"
 
     @staticmethod
     def from_detection() -> "DeviceConfig":
@@ -162,10 +139,68 @@ class ImageConfig:
     normalization: bool = True
 
 
+@dataclass(frozen=True)
+class DatasetPreprocessConfig:
+    """Dataset deterministic preprocessing parameters."""
+
+    # Automatic resize target
+    image_height: int = 512
+    image_width: int = 512
+
+    # Normalization
+    normalization_mode: Literal["divide_255", "none"] = "divide_255"
+
+    # CLAHE
+    clahe_enabled: bool = False
+    clahe_clip_limit: float = 2.0
+    clahe_tile_grid_size: Tuple[int, int] = (8, 8)
+
+    # Contrast/Brightness
+    contrast_enabled: bool = True
+    contrast_limit: float = 0.15  # relative intensity range
+
+    brightness_enabled: bool = True
+    brightness_limit: float = 0.15  # relative (fraction of 255)
+
+    # Gamma correction
+    gamma_enabled: bool = True
+    gamma_limit: float = 0.2
+
+    # Noise robustness (applied where appropriate)
+    noise_robustness_enabled: bool = False
+    noise_sigma: float = 5.0
+
+
+@dataclass(frozen=True)
+class DatasetAugmentationConfig:
+    """Training-only augmentation parameters."""
+
+    hflip_enabled: bool = False  # gated conservatively; flip may be anatomically invalid
+
+    rotation_degrees: float = 10.0
+    shift_pixels: float = 10.0
+    scale_range: Tuple[float, float] = (0.9, 1.1)
+
+    brightness_enabled: bool = True
+    brightness_limit: float = 0.10
+
+    contrast_enabled: bool = True
+    contrast_limit: float = 0.10
+
+    gaussian_noise_enabled: bool = True
+    gaussian_noise_sigma: float = 3.0
+
+    blur_enabled: bool = True
+    blur_kernel_choices: Tuple[int, ...] = (3, 5)
+
+    gamma_enabled: bool = True
+    gamma_limit: float = 0.15
+
+    seed: int | None = None
+
+
 @dataclass
 class TrainingHyperparams:
-    """Training hyperparameters."""
-
     batch_size: int = 4
     learning_rate: float = 1e-3
     epochs: int = 30
@@ -190,14 +225,34 @@ class ClassesConfig:
     class_names: Tuple[str, ...] = ("Background", "Cornea", "Iris")
 
 
-@dataclass
-class TrainingConfig:
-    """Centralized training configuration.
+@dataclass(frozen=True)
+class ModelConfig:
+    """Segmentation model configuration.
 
-    This is designed to be a reusable single source of truth for all future
-    training-related modules.
+    Important contract:
+    - The model must output logits (activation=None) so trainer/loss/metrics work.
     """
 
+    architecture: str = "unetplusplus"
+
+    # segmentation_models_pytorch encoder config
+    encoder_name: str = "efficientnet-b4"
+    encoder_weights: str = "imagenet"
+
+    # task output contract
+    classes: int = 3
+    in_channels: int = 3
+
+    # Must be None to return logits.
+    activation: str | None = None
+
+    # Optional architecture knobs (kept configurable)
+    decoder_attention: bool = False
+    auxiliary_head: bool = False
+
+
+@dataclass
+class TrainingConfig:
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     logs: LogsConfig = field(default_factory=LogsConfig)
@@ -208,12 +263,15 @@ class TrainingConfig:
     training: TrainingHyperparams = field(default_factory=TrainingHyperparams)
     image: ImageConfig = field(default_factory=ImageConfig)
 
+    # Segmentation model config
+    model: ModelConfig = field(default_factory=ModelConfig)
+
+    # v2 dataset pipeline parameters (moved from hardcoded values)
+    preprocess: DatasetPreprocessConfig = field(default_factory=DatasetPreprocessConfig)
+    augmentation: DatasetAugmentationConfig = field(default_factory=DatasetAugmentationConfig)
+
+
     def _as_jsonable(self) -> Dict[str, Any]:
-        """Convert config into JSON-serializable dict.
-
-        Ensures Path and tuples are converted into strings/lists.
-        """
-
         def convert(obj: Any) -> Any:
             if isinstance(obj, Path):
                 return str(obj)
@@ -224,8 +282,7 @@ class TrainingConfig:
             return obj
 
         raw = asdict(self)
-        # asdict already converts dataclasses, but may still contain Paths/tuples.
-        # Walk the structure to convert special types.
+
         def walk(x: Any) -> Any:
             if isinstance(x, dict):
                 return {k: walk(v) for k, v in x.items()}
@@ -240,21 +297,10 @@ class TrainingConfig:
         return walk(raw)
 
     def print_config(self) -> None:
-        """Pretty-print the full configuration to stdout."""
-
         data = self._as_jsonable()
         print(json.dumps(data, indent=2, sort_keys=True))
 
     def save_json(self, path: str | Path = "config.json") -> Path:
-        """Save the configuration as JSON.
-
-        Args:
-            path: Output file path.
-
-        Returns:
-            Resolved output path.
-        """
-
         out_path = Path(path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(
@@ -265,19 +311,9 @@ class TrainingConfig:
 
     @classmethod
     def load_json(cls, path: str | Path) -> "TrainingConfig":
-        """Load TrainingConfig from a JSON file.
-
-        Args:
-            path: JSON config path.
-
-        Returns:
-            TrainingConfig instance.
-        """
-
         in_path = Path(path)
         data = json.loads(in_path.read_text(encoding="utf-8"))
 
-        # Reconstruct dataclasses.
         dataset = DatasetConfig(
             dataset_root=Path(data["dataset"]["dataset_root"]),
             train_folder=data["dataset"]["train_folder"],
@@ -296,9 +332,7 @@ class TrainingConfig:
             log_dir=Path(data["logs"]["log_dir"]),
         )
 
-        output = OutputConfig(
-            prediction_dir=Path(data["output"]["prediction_dir"]),
-        )
+        output = OutputConfig(prediction_dir=Path(data["output"]["prediction_dir"]))
 
         device_raw = data["device"]
         device = DeviceConfig(
@@ -335,6 +369,75 @@ class TrainingConfig:
             normalization=bool(image_raw["normalization"]),
         )
 
+        # Model config (optional for backward compatibility)
+        model_raw = data.get("model", {})
+        model = ModelConfig(
+            architecture=model_raw.get("architecture", ModelConfig.architecture),
+            encoder_name=model_raw.get("encoder_name", ModelConfig.encoder_name),
+            encoder_weights=model_raw.get("encoder_weights", ModelConfig.encoder_weights),
+            classes=int(model_raw.get("classes", classes.number_of_classes)),
+            in_channels=int(model_raw.get("in_channels", image.channels)),
+            activation=model_raw.get("activation", ModelConfig.activation),
+            decoder_attention=bool(model_raw.get("decoder_attention", ModelConfig.decoder_attention)),
+            auxiliary_head=bool(model_raw.get("auxiliary_head", ModelConfig.auxiliary_head)),
+        )
+
+
+        preprocess_raw = data.get("preprocess", {})
+        preprocess = DatasetPreprocessConfig(
+            image_height=int(preprocess_raw.get("image_height", DatasetPreprocessConfig.image_height)),
+            image_width=int(preprocess_raw.get("image_width", DatasetPreprocessConfig.image_width)),
+            normalization_mode=preprocess_raw.get("normalization_mode", DatasetPreprocessConfig.normalization_mode),
+            clahe_enabled=bool(preprocess_raw.get("clahe_enabled", DatasetPreprocessConfig.clahe_enabled)),
+            clahe_clip_limit=float(preprocess_raw.get("clahe_clip_limit", DatasetPreprocessConfig.clahe_clip_limit)),
+            clahe_tile_grid_size=tuple(
+                preprocess_raw.get("clahe_tile_grid_size", list(DatasetPreprocessConfig.clahe_tile_grid_size))
+            ),
+            contrast_enabled=bool(preprocess_raw.get("contrast_enabled", DatasetPreprocessConfig.contrast_enabled)),
+            contrast_limit=float(preprocess_raw.get("contrast_limit", DatasetPreprocessConfig.contrast_limit)),
+            brightness_enabled=bool(preprocess_raw.get("brightness_enabled", DatasetPreprocessConfig.brightness_enabled)),
+            brightness_limit=float(preprocess_raw.get("brightness_limit", DatasetPreprocessConfig.brightness_limit)),
+            gamma_enabled=bool(preprocess_raw.get("gamma_enabled", DatasetPreprocessConfig.gamma_enabled)),
+            gamma_limit=float(preprocess_raw.get("gamma_limit", DatasetPreprocessConfig.gamma_limit)),
+            noise_robustness_enabled=bool(
+                preprocess_raw.get("noise_robustness_enabled", DatasetPreprocessConfig.noise_robustness_enabled)
+            ),
+            noise_sigma=float(preprocess_raw.get("noise_sigma", DatasetPreprocessConfig.noise_sigma)),
+        )
+
+        augmentation_raw = data.get("augmentation", {})
+        augmentation = DatasetAugmentationConfig(
+            hflip_enabled=bool(augmentation_raw.get("hflip_enabled", DatasetAugmentationConfig.hflip_enabled)),
+            rotation_degrees=float(augmentation_raw.get("rotation_degrees", DatasetAugmentationConfig.rotation_degrees)),
+            shift_pixels=float(augmentation_raw.get("shift_pixels", DatasetAugmentationConfig.shift_pixels)),
+            scale_range=tuple(augmentation_raw.get("scale_range", list(DatasetAugmentationConfig.scale_range))),
+            brightness_enabled=bool(
+                augmentation_raw.get("brightness_enabled", DatasetAugmentationConfig.brightness_enabled)
+            ),
+            brightness_limit=float(
+                augmentation_raw.get("brightness_limit", DatasetAugmentationConfig.brightness_limit)
+            ),
+            contrast_enabled=bool(
+                augmentation_raw.get("contrast_enabled", DatasetAugmentationConfig.contrast_enabled)
+            ),
+            contrast_limit=float(
+                augmentation_raw.get("contrast_limit", DatasetAugmentationConfig.contrast_limit)
+            ),
+            gaussian_noise_enabled=bool(
+                augmentation_raw.get("gaussian_noise_enabled", DatasetAugmentationConfig.gaussian_noise_enabled)
+            ),
+            gaussian_noise_sigma=float(
+                augmentation_raw.get("gaussian_noise_sigma", DatasetAugmentationConfig.gaussian_noise_sigma)
+            ),
+            blur_enabled=bool(augmentation_raw.get("blur_enabled", DatasetAugmentationConfig.blur_enabled)),
+            blur_kernel_choices=tuple(
+                augmentation_raw.get("blur_kernel_choices", list(DatasetAugmentationConfig.blur_kernel_choices))
+            ),
+            gamma_enabled=bool(augmentation_raw.get("gamma_enabled", DatasetAugmentationConfig.gamma_enabled)),
+            gamma_limit=float(augmentation_raw.get("gamma_limit", DatasetAugmentationConfig.gamma_limit)),
+            seed=augmentation_raw.get("seed", DatasetAugmentationConfig.seed),
+        )
+
         return cls(
             dataset=dataset,
             checkpoint=checkpoint,
@@ -344,13 +447,16 @@ class TrainingConfig:
             classes=classes,
             training=training,
             image=image,
+            model=model,
+            preprocess=preprocess,
+            augmentation=augmentation,
         )
 
 
-def _verify_roundtrip(original: TrainingConfig, loaded: TrainingConfig) -> None:
-    """Verify that key values match after JSON roundtrip."""
 
+def _verify_roundtrip(original: TrainingConfig, loaded: TrainingConfig) -> None:
     assert original.dataset.dataset_root == loaded.dataset.dataset_root
+
     assert original.dataset.train_folder == loaded.dataset.train_folder
     assert original.dataset.val_folder == loaded.dataset.val_folder
     assert original.dataset.test_folder == loaded.dataset.test_folder
@@ -382,7 +488,11 @@ def _verify_roundtrip(original: TrainingConfig, loaded: TrainingConfig) -> None:
     assert original.image.channels == loaded.image.channels
     assert original.image.normalization == loaded.image.normalization
 
-    # Device fields: verify basic keys exist + equality.
+    assert original.preprocess.image_height == loaded.preprocess.image_height
+    assert original.preprocess.image_width == loaded.preprocess.image_width
+
+    assert original.augmentation.hflip_enabled == loaded.augmentation.hflip_enabled
+
     assert original.device.device_type == loaded.device.device_type
     assert original.device.cuda_available == loaded.device.cuda_available
     assert original.device.gpu_name == loaded.device.gpu_name

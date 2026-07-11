@@ -28,7 +28,7 @@ from training.dataloaders import create_test_loader, create_train_loader, create
 
 from training.losses import CombinedLoss
 from training.metrics import MetricsSpec
-from training.models.unet import UNet
+from training.models.model_factory import create_model
 from training.trainer import Trainer
 from training.utils.checkpoint import CheckpointManager
 from training.utils.logger import Logger
@@ -184,9 +184,10 @@ def main() -> None:
     )
     logger.info("Starting full training...")
 
-    # Create UNet model
-    model = UNet(in_channels=cfg.image.channels, num_classes=cfg.classes.number_of_classes)
+    # Create segmentation model
+    model = create_model(cfg)
     model.to(device)
+
 
     # Create CombinedLoss
     loss_fn = CombinedLoss(dice_weight=1.0)

@@ -32,7 +32,7 @@ from training.metrics import (
     recall_score,
     f1_score,
 )
-from training.models.unet import UNet
+from training.models.model_factory import create_model
 from training.utils.checkpoint import CheckpointManager
 from training.utils.logger import Logger
 
@@ -59,10 +59,12 @@ def main() -> None:
     logger.info("Evaluating on device=%s", device)
 
     # Model
-    model = UNet(in_channels=cfg.image.channels, num_classes=cfg.classes.number_of_classes)
+    model = create_model(cfg)
     model.to(device)
 
     # Load checkpoint (best)
+
+
     checkpoint_manager = CheckpointManager(
         checkpoint_dir=cfg.checkpoint.checkpoint_dir,
         best_model_name=cfg.checkpoint.best_model_name,

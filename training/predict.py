@@ -31,7 +31,7 @@ import numpy as np
 import torch
 
 from training.config import TrainingConfig
-from training.models.unet import UNet
+from training.models.model_factory import create_model
 from training.utils.checkpoint import CheckpointManager
 
 logger = logging.getLogger(__name__)
@@ -261,8 +261,9 @@ def main() -> None:
     out_dir = Path(args.output_dir) if args.output_dir else cfg.output.prediction_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    model = UNet(in_channels=cfg.image.channels, num_classes=cfg.classes.number_of_classes)
+    model = create_model(cfg)
     model.to(device)
+
 
     _load_best_checkpoint(model=model, cfg=cfg, device=device)
 
