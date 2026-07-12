@@ -28,8 +28,12 @@ from matplotlib.backends.backend_pdf import PdfPages
 import matplotlib.pyplot as plt
 
 
-DEFAULT_SOURCE_ROOT = Path(__file__).resolve().parent / "dataset"
-DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parent / "MedicalAI_V3"
+# NOTE: this repo originally assumed a local ./MedicalAI/dataset folder.
+# In your environment the V2 dataset is expected to live under:
+#   /content/drive/MyDrive/MedicalAI/dataset (or a similar path)
+# Override via CLI args if needed.
+DEFAULT_SOURCE_ROOT = Path("/content/drive/MyDrive/MedicalAI/dataset")
+DEFAULT_OUTPUT_ROOT = Path("/content/drive/MyDrive/MedicalAI/MedicalAI_V3")
 PADDING_PIXELS = 40
 
 
