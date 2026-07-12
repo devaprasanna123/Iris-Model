@@ -84,6 +84,20 @@ def main() -> None:
 
     logger.info("Evaluation report saved to %s", output_root)
     logger.info("Overall metrics: %s", report.get("overall", {}))
+    per_class = report.get("per_class", {}) or {}
+    if per_class:
+        logger.info("Per-class metrics:")
+        for metric_name in ("dice", "iou", "precision", "recall", "f1"):
+            metrics_block = per_class.get(metric_name, {}) or {}
+            for class_name in metrics_block:
+                if class_name == "mean":
+                    continue
+                logger.info(
+                    "%s %s: %.6f",
+                    class_name.title(),
+                    metric_name.title(),
+                    float(metrics_block[class_name]),
+                )
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     logger.close()

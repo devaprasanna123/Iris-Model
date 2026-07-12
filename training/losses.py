@@ -143,6 +143,7 @@ class CombinedLoss(nn.Module):
         dice_smooth: float = 1.0,
         dice_eps: float = 1e-7,
         ignore_index: Optional[int] = None,
+        class_weights: Optional[torch.Tensor | list[float] | tuple[float, ...]] = None,
     ) -> None:
         """Initialize combined loss.
 
@@ -157,11 +158,14 @@ class CombinedLoss(nn.Module):
         super().__init__()
         self.dice_weight = float(dice_weight)
 
+        if class_weights is not None and not isinstance(class_weights, torch.Tensor):
+            class_weights = torch.tensor(list(class_weights), dtype=torch.float32)
+
         # CrossEntropyLoss operates on logits and integer targets.
         if ignore_index is None:
-            self.ce = nn.CrossEntropyLoss()
+            self.ce = nn.CrossEntropyLoss(weight=class_weights)
         else:
-            self.ce = nn.CrossEntropyLoss(ignore_index=ignore_index)
+            self.ce = nn.CrossEntropyLoss(weight=class_weights, ignore_index=ignore_index)
 
         self.dice = DiceLoss(smooth=dice_smooth, eps=dice_eps)
 
@@ -356,6 +360,28 @@ class TverskyLoss(nn.Module):
         if self.reduction == "none":
             return loss_per_batch
         return loss_per_batch.mean()
+
+
+class DiceFocalLoss(nn.Module):
+    """0.5 * Dice Loss + 0.5 * Weighted Focal Loss."""
+
+    def __init__(
+        self,
+        *,
+        dice_smooth: float = 1.0,
+        dice_eps: float = 1e-7,
+        focal_gamma: float = 2.0,
+        focal_alpha: Optional[torch.Tensor] = None,
+        ignore_index: Optional[int] = None,
+    ) -> None:
+        super().__init__()
+        self.dice = DiceLoss(smooth=dice_smooth, eps=dice_eps)
+        self.focal = FocalLoss(gamma=focal_gamma, alpha=focal_alpha, ignore_index=ignore_index)
+
+    def forward(self, pred_logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        dice_loss = self.dice(pred_logits, target)
+        focal_loss = self.focal(pred_logits, target)
+        return 0.5 * dice_loss + 0.5 * focal_loss
 
 
 def build_loss_from_config(cfg: "object") -> nn.Module:

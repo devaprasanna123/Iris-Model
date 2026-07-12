@@ -44,11 +44,17 @@ def create_loss(cfg: object) -> nn.Module:
     if loss_name in {"cross_entropy", "ce"}:
         return nn.CrossEntropyLoss()
 
-    # Combined (dice + CE)
-    if loss_name in {"dice_cross_entropy", "dice+ce", "combined", "dice_ce"}:
+    # Combined (weighted CE + dice)
+    if loss_name in {"dice_cross_entropy", "dice+ce", "combined", "dice_ce", "weighted_dice_cross_entropy", "weighted_dice_ce"}:
         dice_smooth = float(getattr(getattr(cfg, "training", cfg), "dice_smooth", 1.0))
         dice_eps = float(getattr(getattr(cfg, "training", cfg), "dice_eps", 1e-7))
-        return _losses.CombinedLoss(dice_weight=dice_weight, dice_smooth=dice_smooth, dice_eps=dice_eps)
+        weights = getattr(getattr(cfg, "training", cfg), "weighted_ce_class_weights", None)
+        return _losses.CombinedLoss(
+            dice_weight=dice_weight,
+            dice_smooth=dice_smooth,
+            dice_eps=dice_eps,
+            class_weights=weights,
+        )
 
     # Weighted CE
     if loss_name in {"weighted_cross_entropy", "weighted_ce", "wce"}:
@@ -57,6 +63,25 @@ def create_loss(cfg: object) -> nn.Module:
             return nn.CrossEntropyLoss()
         class_weights = torch.tensor(list(weights), dtype=torch.float32)
         return _losses.WeightedCrossEntropyLoss(class_weights=class_weights)
+
+    # Dice + Weighted Focal
+    if loss_name in {"dice_weighted_focal", "dice_focal"}:
+        dice_smooth = float(getattr(getattr(cfg, "training", cfg), "dice_smooth", 1.0))
+        dice_eps = float(getattr(getattr(cfg, "training", cfg), "dice_eps", 1e-7))
+        gamma = float(getattr(getattr(cfg, "training", cfg), "focal_gamma", 2.0))
+        alpha = getattr(getattr(cfg, "training", cfg), "focal_alpha", None)
+        alpha_t = None
+        if alpha is not None:
+            if isinstance(alpha, (list, tuple)):
+                alpha_t = torch.tensor(list(alpha), dtype=torch.float32)
+            else:
+                alpha_t = torch.tensor(float(alpha), dtype=torch.float32)
+        return _losses.DiceFocalLoss(
+            dice_smooth=dice_smooth,
+            dice_eps=dice_eps,
+            focal_gamma=gamma,
+            focal_alpha=alpha_t,
+        )
 
     # Focal
     if loss_name in {"focal", "focal_loss"}:

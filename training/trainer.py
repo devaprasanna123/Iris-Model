@@ -47,7 +47,7 @@ try:
 except Exception:  # pragma: no cover
     SummaryWriter = None  # type: ignore
 
-from training.metrics import MetricsSpec, dice_score, iou_score, pixel_accuracy, precision_score, recall_score, f1_score
+from training.metrics import MetricsSpec, dice_score, flatten_per_class_metrics, iou_score, pixel_accuracy, precision_score, recall_score, f1_score
 from training.utils.checkpoint import CheckpointManager
 
 from training.utils.logger import Logger
@@ -268,6 +268,11 @@ class Trainer:
         rec = recall_score(logits, target, spec=self.metrics_spec, input_is_logits=True)
         f1 = f1_score(logits, target, spec=self.metrics_spec, input_is_logits=True)
 
+        per_class = flatten_per_class_metrics(
+            {"dice": dice, "iou": iou, "precision": prec, "recall": rec, "f1": f1},
+            spec=self.metrics_spec,
+        )
+
         return {
             "dice": dice,
             "iou": iou,
@@ -275,6 +280,7 @@ class Trainer:
             "precision": prec,
             "recall": rec,
             "f1": f1,
+            "per_class": per_class,
         }
 
     def _epoch_loop(
@@ -307,6 +313,7 @@ class Trainer:
         prec_mean_sum = 0.0
         rec_mean_sum = 0.0
         f1_mean_sum = 0.0
+        per_class_sums: Dict[str, float] = {}
 
         iterator = tqdm(loader, desc=desc, leave=False)
         for batch in iterator:
@@ -401,6 +408,8 @@ class Trainer:
                 prec_mean_sum += float(metrics["precision"]["mean"])
                 rec_mean_sum += float(metrics["recall"]["mean"])
                 f1_mean_sum += float(metrics["f1"]["mean"])
+                for key, value in metrics.get("per_class", {}).items():
+                    per_class_sums[key] = per_class_sums.get(key, 0.0) + float(value)
 
             iterator.set_postfix({"loss": f"{loss_value:.4f}"})
 
@@ -413,6 +422,9 @@ class Trainer:
         avg_rec = rec_mean_sum / max(1, num_batches)
         avg_f1 = f1_mean_sum / max(1, num_batches)
         avg_grad_norm = (grad_norm_sum / grad_norm_count) if grad_norm_count > 0 else 0.0
+        avg_per_class = {
+            key: (per_class_sums[key] / max(1, num_batches)) for key in per_class_sums
+        }
 
         return {
             "loss": avg_loss,
@@ -423,6 +435,7 @@ class Trainer:
             "recall_mean": avg_rec,
             "f1_mean": avg_f1,
             "grad_norm": avg_grad_norm,
+            "per_class": avg_per_class,
         }
 
     def _maybe_step_scheduler(self) -> None:
@@ -485,6 +498,8 @@ class Trainer:
             dice_mean = float(val_stats.get("dice_mean", 0.0))
             iou_mean = float(val_stats.get("iou_mean", 0.0))
             pix_acc = float(val_stats.get("pixel_accuracy", 0.0))
+            per_class_metrics = val_stats.get("per_class", {}) or {}
+            iris_dice = float(per_class_metrics.get("iris_dice", dice_mean))
 
             # Console + logger
             print(
@@ -505,6 +520,14 @@ class Trainer:
                 pix_acc,
                 lr,
             )
+            for metric_name in ("dice", "iou", "precision", "recall", "f1"):
+                for class_name in self.metrics_spec.class_names:
+                    key = f"{class_name}_{metric_name}"
+                    if key not in per_class_metrics:
+                        continue
+                    line = f"{class_name.title()} {metric_name.title()}: {per_class_metrics[key]:.6f}"
+                    print(line)
+                    self.logger.info(line)
 
             # TensorBoard scalars
             if self.writer is not None:
@@ -518,6 +541,11 @@ class Trainer:
                     self.writer.add_scalar("Precision/val_mean", float(val_stats.get("precision_mean", 0.0)), epoch)
                     self.writer.add_scalar("Recall/val_mean", float(val_stats.get("recall_mean", 0.0)), epoch)
                     self.writer.add_scalar("F1/val_mean", float(val_stats.get("f1_mean", 0.0)), epoch)
+                    for metric_name in ("dice", "iou", "precision", "recall", "f1"):
+                        for class_name in self.metrics_spec.class_names:
+                            key = f"{class_name}_{metric_name}"
+                            value = per_class_metrics.get(key, 0.0)
+                            self.writer.add_scalar(f"{metric_name.title()}/{class_name.title()}", float(value), epoch)
                 except Exception:
                     pass
 
@@ -536,7 +564,7 @@ class Trainer:
                 epoch=epoch,
                 train_loss=train_loss,
                 val_loss=val_loss,
-                dice=dice_mean,
+                dice=iris_dice,
                 best_dice=self.best_dice,
                 training_config=self.training_config,
                 extra={
@@ -555,13 +583,14 @@ class Trainer:
                         "recall": float(val_stats.get("recall_mean", 0.0)),
                         "f1": float(val_stats.get("f1_mean", 0.0)),
                     },
+                    "per_class_metrics": per_class_metrics,
                 },
             )
 
             # Save best if improved
-            improved = dice_mean > self.best_dice
+            improved = iris_dice > self.best_dice
             if improved:
-                self.best_dice = dice_mean
+                self.best_dice = iris_dice
                 self.best_epoch = epoch
                 self.checkpoint_manager.save_best(
                     model=self.model,
@@ -571,7 +600,7 @@ class Trainer:
                     epoch=epoch,
                     train_loss=train_loss,
                     val_loss=val_loss,
-                    dice=dice_mean,
+                    dice=iris_dice,
                     best_dice=self.best_dice,
                     training_config=self.training_config,
                     extra={
@@ -590,6 +619,7 @@ class Trainer:
                             "recall": float(val_stats.get("recall_mean", 0.0)),
                             "f1": float(val_stats.get("f1_mean", 0.0)),
                         },
+                        "per_class_metrics": per_class_metrics,
                     },
                 )
 
@@ -599,7 +629,7 @@ class Trainer:
                     from torch.optim.lr_scheduler import ReduceLROnPlateau
 
                     if isinstance(self.scheduler, ReduceLROnPlateau) or self.scheduler.__class__.__name__ == "ReduceLROnPlateau":
-                        metric_name = "val_dice_mean"
+                        metric_name = "val_iris_dice"
                         tc = self.training_config
                         try:
                             if isinstance(tc, dict):
@@ -615,7 +645,7 @@ class Trainer:
 
                         metric_value = val_stats.get(key, None)
                         if metric_value is None:
-                            metric_value = float(dice_mean)
+                            metric_value = float(iris_dice)
 
                         try:
                             self.scheduler.step(metric_value)
@@ -637,7 +667,7 @@ class Trainer:
 
             # Early stopping
             if self.early_stopping_enabled:
-                should_stop = self.early_stopping.step(dice_mean)
+                should_stop = self.early_stopping.step(iris_dice)
                 if should_stop:
                     self.logger.info("Early stopping triggered at epoch %s.", epoch)
                     break

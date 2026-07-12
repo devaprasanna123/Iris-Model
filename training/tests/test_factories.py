@@ -3,12 +3,28 @@ import torch
 import torch.nn as nn
 
 from training.config import TrainingConfig
+from training.loss_factory import create_loss
 from training.optimizer_factory import create_optimizer
 from training.scheduler_factory import create_scheduler
 
 
 def _dummy_model():
     return nn.Sequential(nn.Linear(8, 16), nn.ReLU(), nn.Linear(16, 4))
+
+
+def test_default_class_weights_are_configurable():
+    cfg = TrainingConfig()
+    assert cfg.training.weighted_ce_class_weights == (0.1, 1.0, 4.0)
+
+
+def test_combined_loss_uses_configured_class_weights():
+    cfg = TrainingConfig()
+    cfg.training.loss_name = "dice_cross_entropy"
+    loss = create_loss(cfg)
+
+    assert hasattr(loss, "ce")
+    assert loss.ce.weight is not None
+    assert torch.allclose(loss.ce.weight, torch.tensor([0.1, 1.0, 4.0], dtype=torch.float32))
 
 
 @pytest.mark.parametrize("opt_name", ["adam", "adamw", "sgd"])

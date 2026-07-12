@@ -232,8 +232,7 @@ class TrainingHyperparams:
     scheduler: SchedulerName = "CosineAnnealingLR"
 
     # -------- Loss (v2) --------
-    # Defaults match current behavior: CE + dice(weight=1.0)
-    loss_name: str = "dice_cross_entropy"
+    loss_name: str = "dice_weighted_focal"
     dice_weight: float = 1.0
 
     # Dice internals (optional)
@@ -241,11 +240,11 @@ class TrainingHyperparams:
     dice_eps: float = 1e-7
 
     # Weighted CE internals (optional)
-    weighted_ce_class_weights: Tuple[float, ...] | None = None
+    weighted_ce_class_weights: Tuple[float, ...] | None = (0.1, 1.0, 5.0)
 
     # Focal
     focal_gamma: float = 2.0
-    focal_alpha: float | Tuple[float, ...] | None = None
+    focal_alpha: float | Tuple[float, ...] | None = (0.1, 1.0, 5.0)
 
     # Tversky
     tversky_alpha: float = 0.5
@@ -290,6 +289,10 @@ class TrainingHyperparams:
     seed: int = 42
 
     workers: int = 2
+
+    # -------- Iris-Aware Sampling (v2) --------
+    sampler_type: str = "iris_aware"
+    sampler_iris_ratio: float = 0.8
 
 
 
@@ -477,13 +480,13 @@ class TrainingConfig:
             seed=int(training_raw.get("seed", 42)),
             workers=int(training_raw.get("workers", 2)),
             # v2 loss fields
-            loss_name=training_raw.get("loss_name", "dice_cross_entropy"),
+            loss_name=training_raw.get("loss_name", "dice_weighted_focal"),
             dice_weight=float(training_raw.get("dice_weight", 1.0)),
             dice_smooth=float(training_raw.get("dice_smooth", 1.0)),
             dice_eps=float(training_raw.get("dice_eps", 1e-7)),
-            weighted_ce_class_weights=tuple(training_raw["weighted_ce_class_weights"]) if training_raw.get("weighted_ce_class_weights") is not None else None,
+            weighted_ce_class_weights=tuple(training_raw["weighted_ce_class_weights"]) if training_raw.get("weighted_ce_class_weights") is not None else (0.1, 1.0, 5.0),
             focal_gamma=float(training_raw.get("focal_gamma", 2.0)),
-            focal_alpha=training_raw.get("focal_alpha", None),
+            focal_alpha=training_raw.get("focal_alpha", (0.1, 1.0, 5.0)),
             tversky_alpha=float(training_raw.get("tversky_alpha", 0.5)),
             tversky_beta=float(training_raw.get("tversky_beta", 0.5)),
             tversky_smooth=float(training_raw.get("tversky_smooth", 1.0)),
@@ -506,6 +509,9 @@ class TrainingConfig:
             warm_restarts_t_0=int(training_raw.get("warm_restarts_t_0", 10)),
             warm_restarts_t_mult=int(training_raw.get("warm_restarts_t_mult", 1)),
             warm_restarts_eta_min=float(training_raw.get("warm_restarts_eta_min", 0.0)),
+            # sampler
+            sampler_type=training_raw.get("sampler_type", "iris_aware"),
+            sampler_iris_ratio=float(training_raw.get("sampler_iris_ratio", 0.8)),
         )
 
 

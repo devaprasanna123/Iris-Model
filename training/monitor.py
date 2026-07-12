@@ -107,6 +107,11 @@ class TrainingMonitor:
             "total_time_s": float(total_time),
         }
 
+        per_class_metrics = val_stats.get("per_class", {}) if isinstance(val_stats, dict) else {}
+        for key, value in per_class_metrics.items():
+            if isinstance(value, (int, float)):
+                record[str(key)] = float(value)
+
         self.history.append(record)
 
         # Write CSV and JSON (overwrite each epoch to keep files current)
@@ -123,6 +128,9 @@ class TrainingMonitor:
             self.writer.add_scalar("Precision/val_mean", record["precision"], step)
             self.writer.add_scalar("Recall/val_mean", record["recall"], step)
             self.writer.add_scalar("F1/val_mean", record["f1"], step)
+            for key, value in record.items():
+                if key.startswith("background_") or key.startswith("cornea_") or key.startswith("iris_"):
+                    self.writer.add_scalar(key, float(value), step)
             self.writer.add_scalar("LR", record["lr"], step)
             self.writer.add_scalar("GradNorm/avg", record["grad_norm"], step)
             self.writer.add_scalar("GPU/memory_mb", record["gpu_mem_mb"], step)
@@ -143,6 +151,11 @@ class TrainingMonitor:
         lines.append(f"Precision:       {record['precision']:.6f}")
         lines.append(f"Recall:          {record['recall']:.6f}")
         lines.append(f"F1:              {record['f1']:.6f}")
+        for metric_suffix in ("dice", "iou", "precision", "recall", "f1"):
+            for key in sorted(record.keys()):
+                if key.endswith(f"_{metric_suffix}"):
+                    label = key[: -len(f"_{metric_suffix}")].replace("_", " ").title()
+                    lines.append(f"{label} {metric_suffix.title()}: {record[key]:.6f}")
         lines.append(f"Learning Rate:   {record['lr']:.8f}")
         lines.append(f"Grad Norm:       {record['grad_norm']:.6f}")
         lines.append(f"GPU Memory (MB): {record['gpu_mem_mb']:.2f}")
@@ -162,7 +175,7 @@ class TrainingMonitor:
     def _write_csv(self) -> None:
         if not self.history:
             return
-        keys = [
+        base_keys = [
             "epoch",
             "train_loss",
             "val_loss",
@@ -177,6 +190,12 @@ class TrainingMonitor:
             "epoch_time_s",
             "total_time_s",
         ]
+        seen_keys = set(base_keys)
+        dynamic_keys = [
+            key for key in sorted({field for record in self.history for field in record.keys()})
+            if key not in seen_keys
+        ]
+        keys = base_keys + dynamic_keys
         try:
             with open(self.csv_path, "w", newline="", encoding="utf-8") as fh:
                 writer = csv.DictWriter(fh, fieldnames=keys)

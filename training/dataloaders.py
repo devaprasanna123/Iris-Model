@@ -109,10 +109,49 @@ def create_train_loader(
         cfg=use_cfg,
     )
 
+    sampler = None
+    if shuffle and getattr(getattr(use_cfg, "training", use_cfg), "sampler_type", "") == "iris_aware":
+        import cv2
+        import numpy as np
+        from torch.utils.data import WeightedRandomSampler
+
+        print("Initializing Iris-aware dataset sampling. Scanning masks...")
+        iris_ratio = float(getattr(getattr(use_cfg, "training", use_cfg), "sampler_iris_ratio", 0.8))
+        no_iris_ratio = 1.0 - iris_ratio
+
+        weights = []
+        iris_count = 0
+        total = len(dataset)
+
+        for idx in range(total):
+            _, mask_path = dataset._pairs[idx]
+            has_iris = False
+            if mask_path is not None:
+                mask = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
+                if mask is not None:
+                    has_iris = (mask == 2).any()
+
+            if has_iris:
+                weights.append(iris_ratio)
+                iris_count += 1
+            else:
+                weights.append(no_iris_ratio)
+
+        print(f"Iris-aware sampling: Found {iris_count}/{total} images with Iris.")
+
+        if iris_count > 0 and (total - iris_count) > 0:
+            w_iris = iris_ratio / iris_count
+            w_no_iris = no_iris_ratio / (total - iris_count)
+            weights = [w_iris if w == iris_ratio else w_no_iris for w in weights]
+
+        sampler = WeightedRandomSampler(weights, num_samples=total, replacement=True)
+        shuffle = False
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=resolved_pin_memory,
     )

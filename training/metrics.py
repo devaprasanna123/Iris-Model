@@ -459,6 +459,31 @@ def f1_score(
     return out
 
 
+def flatten_per_class_metrics(
+    metrics: Dict[str, object],
+    *,
+    spec: MetricsSpec = _DEFAULT_SPEC,
+) -> Dict[str, float]:
+    """Flatten per-class metrics into a simple key/value mapping.
+
+    Example output keys:
+        background_dice, cornea_dice, iris_dice, background_iou, ...
+    """
+
+    flattened: Dict[str, float] = {}
+    for metric_name, metric_value in metrics.items():
+        if not isinstance(metric_value, dict):
+            continue
+        if metric_name not in {"dice", "iou", "precision", "recall", "f1"}:
+            continue
+        for class_name in spec.class_names:
+            if class_name in metric_value:
+                flattened[f"{class_name}_{metric_name}"] = float(metric_value[class_name])
+        if "mean" in metric_value:
+            flattened[f"{metric_name}_mean"] = float(metric_value["mean"])
+    return flattened
+
+
 def evaluate_all_metrics(
     pred_logits: torch.Tensor,
     target: torch.Tensor,
